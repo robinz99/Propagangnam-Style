@@ -1,0 +1,191 @@
+
+
+try:
+    from datasets import load_dataset, Dataset
+    from transformers import (
+        GPT2TokenizerFast,
+        GPT2ForTokenClassification, 
+        AutoModelForTokenClassification,
+        AutoTokenizer,
+        TrainingArguments, 
+        Trainer,
+        DataCollatorForTokenClassification
+    )
+    import os
+    import torch
+except ModuleNotFoundError:
+    print("Please install required packages by running:")
+    print("pip install datasets transformers torch")
+    exit(1)
+
+def load_propaganda_data(articles_dir, labels_dir):
+    data_dict = {
+        'text': [],
+        'labels': []
+    }
+    
+    for article_file in os.listdir(articles_dir):
+        article_id = article_file.split('.')[0]
+        label_file = os.path.join(labels_dir, f"{article_id}.labels")
+        
+        # Try UTF-8 first, fallback to latin-1
+        try:
+            with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
+                text = f.read()
+        except UnicodeDecodeError:
+            with open(os.path.join(articles_dir, article_file), 'r', encoding='latin-1') as f:
+                text = f.read()
+        
+        # Initialize all tokens as non-propaganda (0)
+        labels = [0] * len(text)
+        
+        if os.path.exists(label_file):
+            try:
+                with open(label_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        start, end = map(int, line.strip().split('\t')[:2])
+                        # Mark propaganda spans as 1
+                        for i in range(start, end):
+                            labels[i] = 1
+            except UnicodeDecodeError:
+                with open(label_file, 'r', encoding='latin-1') as f:
+                    for line in f:
+                        start, end = map(int, line.strip().split('\t')[:2])
+                        # Mark propaganda spans as 1
+                        for i in range(start, end):
+                            labels[i] = 1
+        
+        data_dict['text'].append(text)
+        data_dict['labels'].append(labels)
+    
+    return Dataset.from_dict(data_dict)
+
+def tokenize_and_align_labels(examples, tokenizer):
+    tokenized_inputs = tokenizer(
+        examples["text"],
+        truncation=True,
+        max_length=512,
+        padding="max_length",
+        return_tensors="pt"
+    )
+
+    labels = []
+    for i, label in enumerate(examples["labels"]):
+        word_ids = tokenized_inputs.word_ids(batch_index=i)
+        label_ids = []
+        previous_word_idx = None
+        
+        for word_idx in word_ids:
+            if word_idx is None:
+                label_ids.append(-100)
+            else:
+                if word_idx != previous_word_idx:
+                    label_ids.append(label[word_idx])
+                else:
+                    label_ids.append(label[word_idx])
+                previous_word_idx = word_idx
+        
+        labels.append(label_ids)
+
+    tokenized_inputs["labels"] = labels
+    return tokenized_inputs
+
+def train_propaganda_detector():
+    # Initialize tokenizer and model
+    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    tokenizer.pad_token = tokenizer.eos_token
+    model = GPT2ForTokenClassification.from_pretrained('gpt2', num_labels=2)
+
+    # Load and prepare dataset
+    dataset = load_propaganda_data(
+        articles_dir='datasets/train-articles',
+        labels_dir='datasets/train-labels-task1-span-identification'
+    )
+    
+    # Tokenize and align labels
+    tokenized_dataset = dataset.map(
+        lambda x: tokenize_and_align_labels(x, tokenizer),
+        batched=True,
+        remove_columns=dataset.column_names
+    )
+
+    # Split dataset
+    train_test_split = tokenized_dataset.train_test_split(test_size=0.1)
+    
+    # Define training arguments
+    training_args = TrainingArguments(
+        output_dir="propaganda_detector",
+        evaluation_strategy="epoch",
+        learning_rate=5e-5,
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=3,
+        weight_decay=0.01,
+        push_to_hub=False,
+    )
+
+    # Initialize data collator
+    data_collator = DataCollatorForTokenClassification(
+        tokenizer=tokenizer,
+        padding=True,
+        return_tensors="pt"
+    )
+
+    # Initialize trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_test_split["train"],
+        eval_dataset=train_test_split["test"],
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+    )
+
+    # Train the model
+    trainer.train()
+
+    # Save the model
+    trainer.save_model("propaganda_detector_final")
+    tokenizer.save_pretrained("propaganda_detector_final")
+
+if __name__ == "__main__":
+    train_propaganda_detector()
+
+def test_propaganda_detector():
+    # Load the trained model and tokenizer
+    model = AutoModelForTokenClassification.from_pretrained("propaganda_detector_final")
+    tokenizer = AutoTokenizer.from_pretrained("propaganda_detector_final")
+
+    # Load dev dataset
+    dev_dataset = load_propaganda_data(
+        articles_dir='datasets/dev-articles',
+        labels_dir='datasets/dev-labels-task1-span-identification'
+    )
+
+    # Tokenize and align labels for dev set
+    tokenized_dev = dev_dataset.map(
+        lambda x: tokenize_and_align_labels(x, tokenizer),
+        batched=True,
+        remove_columns=dev_dataset.column_names
+    )
+
+    # Initialize trainer for evaluation
+    trainer = Trainer(
+        model=model,
+        tokenizer=tokenizer,
+        data_collator=DataCollatorForTokenClassification(
+            tokenizer=tokenizer,
+            padding=True,
+            return_tensors="pt"
+        )
+    )
+
+    # Run evaluation
+    results = trainer.evaluate(tokenized_dev)
+    
+    print("\nEvaluation Results on Dev Set:")
+    print(f"Loss: {results['eval_loss']:.4f}")
+
+if __name__ == "__main__":
+    train_propaganda_detector()
+    test_propaganda_detector()
