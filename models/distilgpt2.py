@@ -179,7 +179,7 @@ class PropagandaDetector:
               train_labels_dir: str, 
               test_size: float = 0.1,
               epochs: int = 1,
-              learning_rate: float = 5e-5) -> None:
+              learning_rate: float = 5e-3) -> None:
         """
         Train the propaganda detector.
         
@@ -212,13 +212,15 @@ class PropagandaDetector:
             learning_rate=learning_rate,
             per_device_train_batch_size=16,
             per_device_eval_batch_size=16,
+            auto_find_batch_size=True, # finds batch size that fits memory
             num_train_epochs=epochs,
-            weight_decay=0.01,
+            weight_decay=0.001, # update decay
             load_best_model_at_end=True,
             metric_for_best_model="f1",
             logging_steps=10,
             save_total_limit=3,
             report_to="none",
+            fp16=True,
         )
 
         # Initialize data collator and trainer
