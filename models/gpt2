@@ -13,9 +13,17 @@ try:
     )
     import os
     import torch
+    import numpy as np
+    from sklearn.metrics import (
+    accuracy_score, 
+    precision_recall_fscore_support, 
+    classification_report
+)
+
 except ModuleNotFoundError:
+    print(f"Error: {e}")
     print("Please install required packages by running:")
-    print("pip install datasets transformers torch")
+    print("pip install -r requirements.txt")
     exit(1)
 
 def load_propaganda_data(articles_dir, labels_dir):
@@ -57,7 +65,10 @@ def load_propaganda_data(articles_dir, labels_dir):
         
         data_dict['text'].append(text)
         data_dict['labels'].append(labels)
-    
+        
+    if not data_dict['text']:
+        raise ValueError("No data loaded. Ensure the dataset paths are correct.")
+
     return Dataset.from_dict(data_dict)
 
 def tokenize_and_align_labels(examples, tokenizer):
@@ -90,11 +101,59 @@ def tokenize_and_align_labels(examples, tokenizer):
     tokenized_inputs["labels"] = labels
     return tokenized_inputs
 
+def compute_metrics(pred):
+    """
+    Compute detailed metrics for token classification.
+    """
+    labels = pred.label_ids
+    preds = pred.predictions.argmax(-1)
+
+    # Flatten lists and remove ignored index (-100)
+    labels_flat = [label for sublist in labels for label in sublist if label != -100]
+    preds_flat = [pred for sublist, label_sublist in zip(preds, labels) 
+                  for pred, label in zip(sublist, label_sublist) if label != -100]
+
+    # Compute metrics
+    accuracy = accuracy_score(labels_flat, preds_flat)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        labels_flat, preds_flat, average='binary'
+    )
+    
+    # Detailed classification report
+    report = classification_report(labels_flat, preds_flat)
+    
+    # Log metrics to a file
+    with open('training_metrics.txt', 'w') as f:
+        f.write("Detailed Classification Report:\n")
+        f.write(report)
+        f.write(f"\nAccuracy: {accuracy}")
+        f.write(f"\nPrecision: {precision}")
+        f.write(f"\nRecall: {recall}")
+        f.write(f"\nF1 Score: {f1}")
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1
+    }
+
+
 def train_propaganda_detector():
+    # Check CUDA availability
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Initialize tokenizer and model
-    tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    tokenizer.pad_token = tokenizer.eos_token
-    model = GPT2ForTokenClassification.from_pretrained('gpt2', num_labels=2)
+    tokenizer = AutoTokenizer.from_pretrained('distilgpt2')
+    
+    # Add padding token if not exists
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    model = GPT2ForTokenClassification.from_pretrained('distilgpt2', num_labels=2)
+    model.resize_token_embeddings(len(tokenizer))
+    model.to(device)  # Move model to GPU
 
     # Load and prepare dataset
     dataset = load_propaganda_data(
@@ -114,14 +173,23 @@ def train_propaganda_detector():
     
     # Define training arguments
     training_args = TrainingArguments(
-        output_dir="propaganda_detector",
-        evaluation_strategy="epoch",
+        output_dir="propaganda_detector_outputs",
+        eval_strategy="epoch",
+        logging_dir="propaganda_detector_outputs/logs",
+        logging_strategy="epoch",
+        save_strategy="epoch",
         learning_rate=5e-5,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        num_train_epochs=3,
+        per_device_train_batch_size=16, 
+        per_device_eval_batch_size=16, # Reduce for when using GPU
+        auto_find_batch_size=True,
+        num_train_epochs=1,
         weight_decay=0.01,
         push_to_hub=False,
+        load_best_model_at_end=True,
+        metric_for_best_model="f1",
+        fp16=False,  # True For GPU efficiency
+        logging_steps=10,
+        save_total_limit=5,  # Keep only the last 5 model checkpoints
     )
 
     # Initialize data collator
@@ -137,16 +205,24 @@ def train_propaganda_detector():
         args=training_args,
         train_dataset=train_test_split["train"],
         eval_dataset=train_test_split["test"],
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         data_collator=data_collator,
+        compute_metrics=compute_metrics,
     )
 
     # Train the model
-    trainer.train()
-
+    train_result = trainer.train()
+    
+    # Save training metrics
+    metrics = train_result.metrics
+    trainer.log_metrics("train", metrics)
+    trainer.save_metrics("train", metrics)
+    
     # Save the model
     trainer.save_model("propaganda_detector_final")
     tokenizer.save_pretrained("propaganda_detector_final")
+    
+    return trainer
 
 if __name__ == "__main__":
     train_propaganda_detector()
@@ -177,15 +253,23 @@ def test_propaganda_detector():
             tokenizer=tokenizer,
             padding=True,
             return_tensors="pt"
-        )
+        ),
+        compute_metrics=compute_metrics,
     )
 
-    # Run evaluation
-    results = trainer.evaluate(tokenized_dev)
+    # Log detailed results
+    with open('dev_evaluation_results.txt', 'w') as f:
+        f.write("\nDetailed Evaluation Results on Dev Set:\n")
+        for key, value in results.items():
+            f.write(f"{key}: {value}\n")
     
     print("\nEvaluation Results on Dev Set:")
     print(f"Loss: {results['eval_loss']:.4f}")
 
 if __name__ == "__main__":
-    train_propaganda_detector()
+    # Train the model and get trainer
+    trainer = train_propaganda_detector()
+    
+    # Test the model
     test_propaganda_detector()
+    
