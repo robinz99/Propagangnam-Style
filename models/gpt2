@@ -103,7 +103,7 @@ def tokenize_and_align_labels(examples, tokenizer):
 
 def compute_metrics(pred):
     """
-    Compute detailed metrics for token classification.
+    Compute F1 score for token classification.
     """
     labels = pred.label_ids
     preds = pred.predictions.argmax(-1)
@@ -113,35 +113,21 @@ def compute_metrics(pred):
     preds_flat = [pred for sublist, label_sublist in zip(preds, labels) 
                   for pred, label in zip(sublist, label_sublist) if label != -100]
 
-    # Compute metrics
-    accuracy = accuracy_score(labels_flat, preds_flat)
-    precision, recall, f1, _ = precision_recall_fscore_support(
+    # Compute F1 score
+    _, _, f1, _ = precision_recall_fscore_support(
         labels_flat, preds_flat, average='binary'
     )
     
-    # Detailed classification report
-    report = classification_report(labels_flat, preds_flat)
-    
-    # Log metrics to a file
-    with open('training_metrics.txt', 'w') as f:
-        f.write("Detailed Classification Report:\n")
-        f.write(report)
-        f.write(f"\nAccuracy: {accuracy}")
-        f.write(f"\nPrecision: {precision}")
-        f.write(f"\nRecall: {recall}")
-        f.write(f"\nF1 Score: {f1}")
-    
     return {
-        'accuracy': accuracy,
-        'precision': precision,
-        'recall': recall,
         'f1': f1
     }
 
 
 def train_propaganda_detector():
-    # Check CUDA availability
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Use CUDA if available
+    if not torch.cuda.is_available():
+        raise RuntimeError("This script requires a GPU to run")
+    device = torch.device("cuda")
 
     # Initialize tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained('distilgpt2')
@@ -153,7 +139,7 @@ def train_propaganda_detector():
 
     model = GPT2ForTokenClassification.from_pretrained('distilgpt2', num_labels=2)
     model.resize_token_embeddings(len(tokenizer))
-    model.to(device)  # Move model to GPU
+    model.to(device)
 
     # Load and prepare dataset
     dataset = load_propaganda_data(
@@ -171,7 +157,7 @@ def train_propaganda_detector():
     # Split dataset
     train_test_split = tokenized_dataset.train_test_split(test_size=0.1)
     
-    # Define training arguments
+    # Define training arguments optimized for GPU
     training_args = TrainingArguments(
         output_dir="propaganda_detector_outputs",
         eval_strategy="epoch",
@@ -179,17 +165,17 @@ def train_propaganda_detector():
         logging_strategy="epoch",
         save_strategy="epoch",
         learning_rate=5e-5,
-        per_device_train_batch_size=16, 
-        per_device_eval_batch_size=16, # Reduce for when using GPU
+        per_device_train_batch_size=32,
+        per_device_eval_batch_size=32,
         auto_find_batch_size=True,
         num_train_epochs=1,
         weight_decay=0.01,
         push_to_hub=False,
         load_best_model_at_end=True,
         metric_for_best_model="f1",
-        fp16=False,  # True For GPU efficiency
+        fp16=True,  # Enable mixed precision training
         logging_steps=10,
-        save_total_limit=5,  # Keep only the last 5 model checkpoints
+        save_total_limit=5,
     )
 
     # Initialize data collator
@@ -272,4 +258,3 @@ if __name__ == "__main__":
     
     # Test the model
     test_propaganda_detector()
-    

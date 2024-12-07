@@ -32,7 +32,14 @@ class PropagandaDetector:
             output_dir (str): Directory to save model and outputs
             resume_from_checkpoint (str, optional): Path to checkpoint to resume training
         """
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        # Check if CUDA is available and set device
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            self.device = torch.device("cpu")
+            print("CUDA not available, using CPU")
+
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
 
@@ -45,13 +52,16 @@ class PropagandaDetector:
         # Initialize or load model
         if resume_from_checkpoint:
             self.model = AutoModelForTokenClassification.from_pretrained(resume_from_checkpoint)
+            print(f"Loaded model from checkpoint: {resume_from_checkpoint}")
         else:
             self.model = GPT2ForTokenClassification.from_pretrained(
                 model_name, num_labels=2
             )
+            print(f"Initialized new model from {model_name}")
         
         self.model.resize_token_embeddings(len(self.tokenizer))
         self.model.to(self.device)
+        print(f"Model moved to {self.device}")
 
     def load_data(self, articles_dir, labels_dir):
         data_dict = {
@@ -220,7 +230,7 @@ class PropagandaDetector:
             logging_steps=10,
             save_total_limit=3,
             report_to="none",
-            fp16=True,
+            fp16=torch.cuda.is_available(),  # Enable mixed precision if CUDA available
         )
 
         # Initialize data collator and trainer
@@ -239,10 +249,19 @@ class PropagandaDetector:
             compute_metrics=self.compute_metrics,
         )
 
+        print("\nStarting training...")
+        print(f"Training on device: {self.device}")
+        if torch.cuda.is_available():
+            print(f"GPU Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+
         # Train and save
         trainer.train()
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
+
+        print("\nTraining completed!")
+        if torch.cuda.is_available():
+            print(f"Final GPU Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
 
     def predict(self, text: str) -> Dict[str, Any]:
         """
@@ -256,7 +275,7 @@ class PropagandaDetector:
             return_tensors="pt", 
             truncation=True, 
             max_length=512
-        )
+        ).to(self.device)  # Move inputs to GPU if available
 
         # Predict
         with torch.no_grad():
