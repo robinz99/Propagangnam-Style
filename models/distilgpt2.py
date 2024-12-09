@@ -69,8 +69,14 @@ class PropagandaDetector:
             'labels': []
         }
         for article_file in os.listdir(articles_dir):
-            article_id = article_file.split('.')[0]
-            label_file = os.path.join(labels_dir, f"{article_id}.labels")
+            for article_file in os.listdir(articles_dir):
+                # Extract the article ID (e.g., "article111111117")
+                article_id = article_file.split('.')[0]
+                # Construct the corresponding label file name with ".task1-SI"
+                label_file = os.path.join(labels_dir, f"{article_id}.task1-SI")
+                print(f"Article file: {article_file}")
+                print(f"Expected label file: {label_file}")
+                print(f"Label file exists: {os.path.exists(label_file)}")
 
             try:
                 with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
@@ -80,20 +86,28 @@ class PropagandaDetector:
                     text = f.read()
 
             labels = [0] * len(text)
-
             if os.path.exists(label_file):
-                try:
-                    with open(label_file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            start, end = map(int, line.strip().split('\t')[:2])
-                            for i in range(start, end):
-                                labels[i] = 1
-                except UnicodeDecodeError:
-                    with open(label_file, 'r', encoding='latin-1') as f:
-                        for line in f:
-                            start, end = map(int, line.strip().split('\t')[:2])
-                            for i in range(start, end):
-                                labels[i] = 1
+              print(f"Contents of {label_file}:")
+              with open(label_file, 'r', encoding='utf-8') as f:
+                  print(f.read())
+              try:
+                  with open(label_file, 'r', encoding='utf-8') as f:
+                      for line in f:
+                          parts = line.strip().split('\t')
+                          # Extract start and end indices if available
+                          if len(parts) >= 3:
+                              start, end = map(int, parts[1:3])
+                              # Update labels array for the specified range
+                              labels[start:end] = [1] * (end - start)
+              except UnicodeDecodeError:
+                  with open(label_file, 'r', encoding='latin-1') as f:
+                      for line in f:
+                          parts = line.strip().split('\t')
+                          # Extract start and end indices if available
+                          if len(parts) >= 3:
+                              start, end = map(int, parts[1:3])
+                              # Update labels array for the specified range
+                              labels[start:end] = [1] * (end - start)
 
             data_dict['text'].append(text)
             data_dict['labels'].append(labels)
@@ -105,15 +119,14 @@ class PropagandaDetector:
 
     def tokenize_and_align_labels(self, examples: Dict[str, Any], tokenizer) -> Dict[str, torch.Tensor]:
         """
-        Tokenize input and align labels with tokenized inputs.
-        
-        Args:
-            examples (dict): Dataset examples
-            tokenizer: Tokenizer to use
-        
-        Returns:
-            dict: Tokenized inputs with aligned labels
+        Tokenize inputs and align labels, logging debug information to a file.
         """
+        debug_file = os.path.join(self.output_dir, "debug_tokenization.txt")
+        
+        with open(debug_file, "a") as f:  # Append mode to accumulate logs
+            f.write("=== Tokenizing Example ===\n")
+            f.write(f"Text: {examples['text']}\n")
+        
         tokenized_inputs = tokenizer(
             examples["text"],
             truncation=True,
@@ -121,9 +134,12 @@ class PropagandaDetector:
             padding="max_length",
             return_tensors="pt"
         )
-
+        
         labels = []
         for i, label in enumerate(examples["labels"]):
+            f.write(f"\nAligning Labels for Example {i}:\n")
+            f.write(f"Original Labels: {label}\n")
+            
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             label_ids = []
             previous_word_idx = None
@@ -132,26 +148,23 @@ class PropagandaDetector:
                 if word_idx is None:
                     label_ids.append(-100)
                 else:
-                    if word_idx != previous_word_idx:
-                        label_ids.append(label[word_idx])
-                    else:
-                        label_ids.append(label[word_idx])
+                    label_ids.append(label[word_idx])
                     previous_word_idx = word_idx
-            
-            labels.append(label_ids)
 
+            label_ids += [-100] * (512 - len(label_ids))
+            f.write(f"Aligned Labels: {label_ids}\n")
+            labels.append(label_ids)
+        
         tokenized_inputs["labels"] = labels
+        f.write("=== End of Tokenization ===\n\n")
+    
         return tokenized_inputs
+
+
 
     def compute_metrics(self, pred) -> Dict[str, float]:
         """
-        Compute detailed metrics for token classification.
-        
-        Args:
-            pred: Prediction object from Trainer
-        
-        Returns:
-            dict: Computed metrics
+        Compute detailed metrics for token classification and save debug info.
         """
         labels = pred.label_ids
         preds = pred.predictions.argmax(-1)
@@ -161,12 +174,18 @@ class PropagandaDetector:
         preds_flat = [pred for sublist, label_sublist in zip(preds, labels) 
                       for pred, label in zip(sublist, label_sublist) if label != -100]
 
+        # Save labels and predictions for debugging
+        debug_path = os.path.join(self.output_dir, "debug_labels_preds.txt")
+        with open(debug_path, "w") as f:
+            for i, (true, pred) in enumerate(zip(labels_flat, preds_flat)):
+                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
+
         # Compute metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
             labels_flat, preds_flat, average='binary', zero_division=1
         )
-        
+
         # Log detailed results
         report = classification_report(labels_flat, preds_flat)
         with open(os.path.join(self.output_dir, 'classification_report.txt'), 'w') as f:
@@ -176,7 +195,7 @@ class PropagandaDetector:
             f.write(f"F1 Score: {f1}\n\n")
             f.write("Detailed Classification Report:\n")
             f.write(report)
-        
+    
         return {
             'accuracy': accuracy,
             'precision': precision,
@@ -184,35 +203,29 @@ class PropagandaDetector:
             'f1': f1
         }
 
+
     def train(self, 
-              train_articles_dir: str, 
-              train_labels_dir: str, 
-              test_size: float = 0.1,
-              epochs: int = 1,
-              learning_rate: float = 5e-3) -> None:
+          train_articles_dir: str, 
+          train_labels_dir: str, 
+          test_size: float = 0.1,
+          epochs: int = 1,
+          learning_rate: float = 5e-3) -> None:
         """
-        Train the propaganda detector.
-        
-        Args:
-            train_articles_dir (str): Directory with training articles
-            train_labels_dir (str): Directory with training labels
-            test_size (float): Proportion of data to use for validation
-            epochs (int): Number of training epochs
-            learning_rate (float): Learning rate for training
+        Train the propaganda detector and log outputs for debugging.
         """
         # Load dataset
         dataset = self.load_data(train_articles_dir, train_labels_dir)
         
         # Tokenize and align labels
         tokenized_dataset = dataset.map(
-            lambda x: self.tokenize_and_align_labels(x, self.tokenizer),
+            lambda x: self.tokenize_and_align_labels(x),
             batched=True,
             remove_columns=dataset.column_names
         )
 
         # Split dataset
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
-        
+
         # Define training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
@@ -222,15 +235,12 @@ class PropagandaDetector:
             learning_rate=learning_rate,
             per_device_train_batch_size=16,
             per_device_eval_batch_size=16,
-            auto_find_batch_size=True, # finds batch size that fits memory
             num_train_epochs=epochs,
-            weight_decay=0.001, # update decay
+            weight_decay=0.001,
             load_best_model_at_end=True,
             metric_for_best_model="f1",
             logging_steps=10,
-            save_total_limit=3,
             report_to="none",
-            fp16=torch.cuda.is_available(),  # Enable mixed precision if CUDA available
         )
 
         # Initialize data collator and trainer
@@ -239,6 +249,10 @@ class PropagandaDetector:
             padding=True,
             return_tensors="pt"
         )
+
+        # Inspect the tokenized dataset
+        for i, example in enumerate(tokenized_dataset):
+          print(f"Example {i}: input_ids={len(example['input_ids'])}, labels={len(example['labels'])}")
 
         trainer = Trainer(
             model=self.model,
@@ -251,17 +265,22 @@ class PropagandaDetector:
 
         print("\nStarting training...")
         print(f"Training on device: {self.device}")
-        if torch.cuda.is_available():
-            print(f"GPU Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
 
         # Train and save
         trainer.train()
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
 
-        print("\nTraining completed!")
-        if torch.cuda.is_available():
-            print(f"Final GPU Memory allocated: {torch.cuda.memory_allocated(0) / 1024**2:.2f} MB")
+        # Save test set labels and predictions
+        predictions, labels, _ = trainer.predict(train_test_split["test"])
+        predictions = predictions.argmax(-1)
+        debug_eval_file = os.path.join(self.output_dir, "debug_eval_predictions.txt")
+        with open(debug_eval_file, "w") as f:
+            for i, (true, pred) in enumerate(zip(labels.flatten(), predictions.flatten())):
+                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
+
+    print("\nTraining completed!")
+
 
     def predict(self, text: str) -> Dict[str, Any]:
         """
