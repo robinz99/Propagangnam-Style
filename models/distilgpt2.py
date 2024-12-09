@@ -73,10 +73,10 @@ class PropagandaDetector:
                 # Extract the article ID (e.g., "article111111117")
                 article_id = article_file.split('.')[0]
                 # Construct the corresponding label file name with ".task1-SI"
-                label_file = os.path.join(labels_dir, f"{article_id}.task1-SI")
-                print(f"Article file: {article_file}")
-                print(f"Expected label file: {label_file}")
-                print(f"Label file exists: {os.path.exists(label_file)}")
+                label_file = os.path.join(labels_dir, f"{article_id}.task1-SI.labels")
+                # print(f"Article file: {article_file}")
+                # print(f"Expected label file: {label_file}")
+                # print(f"Label file exists: {os.path.exists(label_file)}")
 
             try:
                 with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
@@ -121,12 +121,9 @@ class PropagandaDetector:
         """
         Tokenize inputs and align labels, logging debug information to a file.
         """
-        debug_file = os.path.join(self.output_dir, "debug_tokenization.txt")
+        debug_file_path = os.path.join(self.output_dir, "debug_tokenization.txt")
         
-        with open(debug_file, "a") as f:  # Append mode to accumulate logs
-            f.write("=== Tokenizing Example ===\n")
-            f.write(f"Text: {examples['text']}\n")
-        
+        # Tokenize inputs
         tokenized_inputs = tokenizer(
             examples["text"],
             truncation=True,
@@ -136,9 +133,18 @@ class PropagandaDetector:
         )
         
         labels = []
+        
+        # Append debug information
+        with open(debug_file_path, "a") as f:
+            f.write("=== Tokenizing Example ===\n")
+            f.write(f"Number of texts: {len(examples['text'])}\n")
+        
+        # Process each example
         for i, label in enumerate(examples["labels"]):
-            f.write(f"\nAligning Labels for Example {i}:\n")
-            f.write(f"Original Labels: {label}\n")
+            # Open and close file for each iteration
+            with open(debug_file_path, "a") as f:
+                f.write(f"\nAligning Labels for Example {i}:\n")
+                f.write(f"Original Labels: {label}\n")
             
             word_ids = tokenized_inputs.word_ids(batch_index=i)
             label_ids = []
@@ -152,15 +158,20 @@ class PropagandaDetector:
                     previous_word_idx = word_idx
 
             label_ids += [-100] * (512 - len(label_ids))
-            f.write(f"Aligned Labels: {label_ids}\n")
+            
+            # Log aligned labels
+            with open(debug_file_path, "a") as f:
+                f.write(f"Aligned Labels: {label_ids}\n")
+            
             labels.append(label_ids)
         
+        # Log end of tokenization
+        with open(debug_file_path, "a") as f:
+            f.write("=== End of Tokenization ===\n\n")
+        
         tokenized_inputs["labels"] = labels
-        f.write("=== End of Tokenization ===\n\n")
-    
+        
         return tokenized_inputs
-
-
 
     def compute_metrics(self, pred) -> Dict[str, float]:
         """
@@ -218,7 +229,7 @@ class PropagandaDetector:
         
         # Tokenize and align labels
         tokenized_dataset = dataset.map(
-            lambda x: self.tokenize_and_align_labels(x),
+            lambda x: self.tokenize_and_align_labels(x, self.tokenizer),
             batched=True,
             remove_columns=dataset.column_names
         )
