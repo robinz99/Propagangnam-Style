@@ -1,0 +1,41 @@
+import os
+from models.span import PropagandaDetector  # Replace with the correct import path to your script
+
+def test_extract_spans():
+    # Example text and label file path (update with your test file locations)
+    text = "This is a sample article with propaganda. This part is non-propaganda."
+    labels_file = 'path/to/your/label/file.labels'  # Replace with actual path to a label file
+
+    detector = PropagandaDetector(model_name='distilgpt2', max_span_length=1024)
+    
+    # Run the extract_spans method
+    spans = detector.extract_spans(text, labels_file)
+
+    # Print the extracted spans
+    print("Extracted spans:")
+    for span in spans:
+        print(f"Text: {span['text']}, Label: {span['label']}")
+
+def test_load_data():
+    # Define directories for articles and labels (replace with actual directories)
+    articles_dir = 'path/to/your/articles'  # Replace with actual path to article directory
+    labels_dir = 'path/to/your/labels'  # Replace with actual path to label directory
+
+    detector = PropagandaDetector(model_name='distilgpt2', max_span_length=1024)
+    
+    # Run the load_data method
+    dataset = detector.load_data(articles_dir, labels_dir)
+
+    # Print the loaded dataset
+    print("Loaded dataset:")
+    print(dataset)
+
+def main():
+    print("Testing extract_spans method:")
+    test_extract_spans()
+    
+    print("\nTesting load_data method:")
+    test_load_data()
+
+if __name__ == "__main__":
+    main()
