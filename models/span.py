@@ -291,11 +291,11 @@ class PropagandaDetector:
 
 
     def train(self, 
-            train_articles_dir: str, 
-            train_labels_dir: str, 
-            test_size: float = 0.1,
-            epochs: int = 1,
-            learning_rate: float = 5e-5):
+          train_articles_dir: str, 
+          train_labels_dir: str, 
+          test_size: float = 0.1,
+          epochs: int = 1,
+          learning_rate: float = 5e-5):
         """
         Train the propaganda detector
         """
@@ -311,9 +311,6 @@ class PropagandaDetector:
         
         # Split dataset
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
-
-        # Define the loss function (example using CrossEntropyLoss)
-        criterion = torch.nn.CrossEntropyLoss()
 
         # Define training arguments
         training_args = TrainingArguments(
@@ -339,7 +336,7 @@ class PropagandaDetector:
             return_tensors="pt"
         )
 
-        # Initialize trainer
+        # Initialize trainer (this will automatically handle loss)
         trainer = Trainer(
             model=self.model,
             args=training_args,
@@ -350,20 +347,13 @@ class PropagandaDetector:
             processing_class=self.tokenizer
         )
 
-        # Training loop with loss calculation
-        for epoch in range(epochs):
-            trainer.train()
-            for batch in trainer.get_train_dataloader():
-                inputs = {k: v.to(self.device) for k, v in batch.items()}
-                outputs = self.model(**inputs)
-                loss = criterion(outputs.logits, inputs['labels'])  # Calculate loss
-                loss.backward()
-                trainer.optimizer.step()
-                trainer.optimizer.zero_grad()
-        
+        # Train the model using Trainer (no need to manually calculate loss)
+        trainer.train()
+
         # Save model
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
+
 
     def predict(self, text: str):
         """
