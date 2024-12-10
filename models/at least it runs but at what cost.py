@@ -266,12 +266,12 @@ def main():
     detector.train(
         train_articles_dir='datasets/two-articles',
         train_labels_dir='datasets/all_in_one_labels/all_labels.txt',
-        epochs=3
+        epochs=10
     )
     
     test_texts = [
         "This is a sample text without propaganda.",
-        "This is a text with clear propaganda messaging."
+        "He also pointed to the presence of the pneumonic version, which spreads more easily and is more virulent, in the latest outbreak."
     ]
     
     for text in test_texts:
