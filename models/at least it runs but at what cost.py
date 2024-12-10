@@ -198,7 +198,7 @@ class PropagandaDetector:
         # Define training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
-            evaluation_strategy="epoch",
+            eval_strategy="epoch",
             save_strategy="epoch",
             learning_rate=learning_rate,
             per_device_train_batch_size=16,
@@ -209,7 +209,8 @@ class PropagandaDetector:
             metric_for_best_model="f1",
             logging_dir=os.path.join(self.output_dir, "logs"),
             logging_steps=10,
-            save_total_limit=2
+            save_total_limit=2,
+            fp16=True if self.device == "cuda" else False,  # Use mixed precision for faster training (if applicable)
         )
 
         # Data collator
@@ -226,7 +227,7 @@ class PropagandaDetector:
             eval_dataset=train_test_split["test"],
             compute_metrics=self.compute_metrics,
             data_collator=data_collator,
-            tokenizer=self.tokenizer
+            processing_class==self.tokenizer
         )
 
         # Train the model
