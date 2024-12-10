@@ -61,13 +61,13 @@ class PropagandaDetector:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(self.device)
 
-    def extract_spans(self, text: str, labels_file: str) -> List[Dict[str, Any]]:
+    def extract_spans(self, text: str, train_labels_dir: str) -> List[Dict[str, Any]]:
         """
         Extract propaganda and non-propaganda spans from text.
         
         Args:
             text (str): Full text content
-            labels_file (str): Path to labels file
+            train_labels_dir (str): Path to labels file
         
         Returns:
             List of span dictionaries with 'text' and 'label' keys
@@ -75,16 +75,17 @@ class PropagandaDetector:
         # Extract propaganda spans from labels file
         propaganda_spans = []
         try:
-            with open(labels_file, 'r', encoding='utf-8') as f:
+            with open(train_labels_dir, 'r', encoding='utf-8') as f:
                 for line in f:
                     parts = line.strip().split('\t')
                     if len(parts) >= 3:
+                        # Ignore the first field (Article ID)
                         start, end = int(parts[1]), int(parts[2])
                         # Make sure the start and end are within bounds of the text
                         if start < len(text) and end <= len(text) and start < end:
                             propaganda_spans.append((start, end))
         except UnicodeDecodeError:
-            with open(labels_file, 'r', encoding='latin-1') as f:
+            with open(train_labels_dir, 'r', encoding='latin-1') as f:
                 for line in f:
                     parts = line.strip().split('\t')
                     if len(parts) >= 3:
@@ -138,21 +139,45 @@ class PropagandaDetector:
 
         return filtered_spans
 
-    def load_data(self, articles_dir: str, labels_dir: str) -> Dataset:
+    def load_data(self, articles_dir: str, train_labels_dir: str) -> Dataset:
         """
         Loads articles and corresponding labels from the directories.
         Returns a HuggingFace Dataset object.
         """
         data_dict = {'text': [], 'label': []}
+        article_labels = {}
+
+        # Read all label spans from the labels file
+        try:
+            with open(train_labels_dir, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) == 3:
+                        article_id = parts[0]
+                        start = int(parts[1])
+                        end = int(parts[2])
+
+                        # Organize spans by article ID
+                        if article_id not in article_labels:
+                            article_labels[article_id] = []
+                        article_labels[article_id].append((start, end))
+                    else:
+                        print(f"Skipping malformed line: {line}")
+        except Exception as e:
+            print(f"Error reading label file: {e}")
+            raise ValueError(f"Failed to read {train_labels_dir} file.")
 
         # Process each article
         for article_file in os.listdir(articles_dir):
-            # Extract article ID (assuming the file names are in the format articleID.txt)
-            article_id = article_file.split('.')[0]
+            # Ensure the file matches the expected naming pattern
+            if not article_file.startswith('article') or not article_file.endswith('.txt'):
+                continue
+
+            # Extract article ID 
+            article_id = article_file[7:-4]  # Remove 'article' prefix and '.txt' suffix
             
-            # Full path to article and label files
+            # Full path to article
             article_path = os.path.join(articles_dir, article_file)
-            label_path = os.path.join(labels_dir, f"{article_id}.task1-SI.labels")
 
             # Read article text
             try:
@@ -162,14 +187,34 @@ class PropagandaDetector:
                 with open(article_path, 'r', encoding='latin-1') as f:
                     text = f.read()
 
-            # Extract spans if label file exists
-            if os.path.exists(label_path):
-                spans = self.extract_spans(text, label_path)
-                
-                # Add spans to dataset
-                for span in spans:
-                    data_dict['text'].append(span['text'])
-                    data_dict['label'].append(span['label'])
+            # If there are labels for this article
+            if article_id in article_labels:
+                # Sort the spans by the start value
+                propaganda_spans = sorted(article_labels[article_id], key=lambda x: x[0])
+                last_end = 0  # Track the end of the last span
+
+                # Add non-propaganda text before and between the propaganda spans
+                for start, end in propaganda_spans:
+                    # Non-propaganda span before the current propaganda span
+                    if start > last_end:
+                        non_prop_span = text[last_end:start]
+                        if len(non_prop_span.strip()) > 0:
+                            data_dict['text'].append(non_prop_span)
+                            data_dict['label'].append(0)  # Non-propaganda
+                    
+                    # Add propaganda span
+                    prop_span = text[start:end]
+                    data_dict['text'].append(prop_span)
+                    data_dict['label'].append(1)  # Propaganda
+                    
+                    last_end = end
+
+                # Add final non-propaganda span after the last propaganda span
+                if last_end < len(text):
+                    final_non_prop_span = text[last_end:]
+                    if len(final_non_prop_span.strip()) > 0:
+                        data_dict['text'].append(final_non_prop_span)
+                        data_dict['label'].append(0)  # Non-propaganda
 
         if not data_dict['text']:
             raise ValueError("No data loaded. Check dataset paths.")
@@ -179,49 +224,77 @@ class PropagandaDetector:
 
     def tokenize_data(self, examples):
         """
-        Tokenize input texts and ensure truncation.
+        Tokenizes a batch of examples.
+
+        Args:
+            examples (Dict[str, Any]): A dictionary of examples with keys 'text' and 'label'
+
+        Returns:
+            Tokenized examples ready for model training.
         """
         return self.tokenizer(
-            examples['text'],
-            truncation=True,
-            padding=True,  # Automatically pads to max length
+            examples['text'], 
+            truncation=True, 
+            padding=True, 
             max_length=self.max_span_length
         )
-
-    def compute_metrics(self, pred):
+        
+    def compute_metrics(self, pred) -> Dict[str, float]:
         """
-        Compute classification metrics
-        """
-        labels = pred.label_ids
-        preds = pred.predictions.argmax(-1)
+        Compute detailed metrics for span classification and save debug info.
 
-        accuracy = accuracy_score(labels, preds)
+        Args:
+            pred: A PredictionOutput object from the Trainer.
+
+        Returns:
+            Dict[str, float]: Dictionary containing accuracy, precision, recall, and F1 score.
+        """
+        labels = pred.label_ids  # True labels
+        preds = pred.predictions.argmax(axis=-1)  # Predicted labels
+
+        # Flatten lists (if needed for compatibility with datasets)
+        labels_flat = labels.flatten()
+        preds_flat = preds.flatten()
+
+        # Compute metrics at the span level
+        accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            labels, preds, average='binary', zero_division=1
+            labels_flat, preds_flat, average="binary", zero_division=1
         )
 
-        # Log detailed results
-        report = classification_report(labels, preds)
-        with open(os.path.join(self.output_dir, 'classification_report.txt'), 'w') as f:
+        # Save detailed results for debugging
+        debug_path = os.path.join(self.output_dir, "debug_labels_preds.txt")
+        with open(debug_path, "w") as f:
+            for i, (true, pred) in enumerate(zip(labels_flat, preds_flat)):
+                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
+
+        # Generate a classification report
+        report = classification_report(labels_flat, preds_flat, target_names=["Non-Propaganda", "Propaganda"])
+
+        # Save classification report for detailed evaluation
+        report_path = os.path.join(self.output_dir, "classification_report.txt")
+        with open(report_path, "w") as f:
             f.write(f"Accuracy: {accuracy}\n")
             f.write(f"Precision: {precision}\n")
             f.write(f"Recall: {recall}\n")
             f.write(f"F1 Score: {f1}\n\n")
             f.write("Detailed Classification Report:\n")
             f.write(report)
-    
+
+        # Return the metrics
         return {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1
         }
+
 
     def train(self, 
             train_articles_dir: str, 
             train_labels_dir: str, 
             test_size: float = 0.1,
-            epochs: int = 3,
+            epochs: int = 1,
             learning_rate: float = 5e-5):
         """
         Train the propaganda detector
@@ -238,6 +311,9 @@ class PropagandaDetector:
         
         # Split dataset
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
+
+        # Define the loss function (example using CrossEntropyLoss)
+        criterion = torch.nn.CrossEntropyLoss()
 
         # Define training arguments
         training_args = TrainingArguments(
@@ -274,8 +350,16 @@ class PropagandaDetector:
             processing_class=self.tokenizer
         )
 
-        # Train
-        trainer.train()
+        # Training loop with loss calculation
+        for epoch in range(epochs):
+            trainer.train()
+            for batch in trainer.get_train_dataloader():
+                inputs = {k: v.to(self.device) for k, v in batch.items()}
+                outputs = self.model(**inputs)
+                loss = criterion(outputs.logits, inputs['labels'])  # Calculate loss
+                loss.backward()
+                trainer.optimizer.step()
+                trainer.optimizer.zero_grad()
         
         # Save model
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
@@ -309,14 +393,14 @@ class PropagandaDetector:
 def main():
     # Example usage
     detector = PropagandaDetector(
-        model_name='distilgpt2',
+        model_name='distilbert-base-uncased',
         max_span_length=1024  # Adjust as needed
     )
     
     # Train the model
     detector.train(
         train_articles_dir='datasets/two-articles',
-        train_labels_dir='datasets/two-labels'
+        train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
     )
     
     # Example predictions
