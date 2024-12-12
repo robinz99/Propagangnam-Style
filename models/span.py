@@ -23,7 +23,7 @@ class PropagandaDetector:
     def __init__(self, 
                  model_name: str = 'distilgpt2', 
                  output_dir: str = "propaganda_detector",
-                 max_span_length: int = 1024,
+                 max_span_length: int = 512,
                  resume_from_checkpoint: Optional[str] = None):
         """
         Initialize the Propaganda Detector.
@@ -376,9 +376,82 @@ class PropagandaDetector:
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
 
 
+    def predict_spans(self, article_id: str, article_path: str):
+        """
+        Predict and label spans in a full news article as propaganda or non-propaganda.
+
+        Args:
+            article_id (str): ID of the article (used for output format).
+            article_path (str): Path to the text file containing the news article.
+
+        Returns:
+            List[str]: A list of labeled spans in the format "article_id start end".
+        """
+        # Read the article content
+        try:
+            with open(article_path, 'r', encoding='utf-8') as f:
+                article_text = f.read()
+        except UnicodeDecodeError:
+            with open(article_path, 'r', encoding='latin-1') as f:
+                article_text = f.read()
+
+        # Tokenize the text and retrieve offsets
+        encoded_text = self.tokenizer(
+            article_text,
+            truncation=False,
+            return_offsets_mapping=True
+        )
+        input_ids = encoded_text["input_ids"]
+        offsets = encoded_text["offset_mapping"]
+
+        spans = []
+
+        # Process input in chunks
+        for i in range(0, len(input_ids), self.max_span_length):
+            chunk_ids = input_ids[i:i + self.max_span_length]
+            chunk_offsets = offsets[i:i + self.max_span_length]
+
+            # Decode the chunk back to text
+            chunk_text = self.tokenizer.decode(chunk_ids, skip_special_tokens=True)
+
+            if not chunk_text.strip():
+                # Log skipped empty chunks
+                print(f"Skipping empty chunk for article {article_id}, indices {i} to {i + self.max_span_length}")
+                continue
+
+            # Ensure truncation when re-encoding
+            chunk_encoded = self.tokenizer(
+                chunk_text,
+                truncation=True,
+                max_length=self.max_span_length,
+                return_offsets_mapping=False,
+                return_tensors="pt"
+            ).to(self.device)
+
+            # Predict the chunk
+            with torch.no_grad():
+                outputs = self.model(**chunk_encoded)
+                predictions = torch.softmax(outputs.logits, dim=1)
+                propaganda_prob = predictions[0][1].item()
+
+            if propaganda_prob > 0.5:  # If classified as propaganda
+                spans.append(f"{article_id}\t{chunk_offsets[0][0]}\t{chunk_offsets[-1][1]}")
+                print(f"PROPAGANDA ALERT in chunk for article {article_id}")
+            else:
+                print(f"No propaganda detected in chunk for article {article_id}, indices {i} to {i + self.max_span_length}")
+
+        return spans
+
+
     def predict(self, text: str):
         """
-        Predict if a given text span contains propaganda
+        Predict if a given text span contains propaganda.
+
+        Args:
+            text (str): Input text to classify.
+
+        Returns:
+            Dict[str, Any]: A dictionary with keys 'has_propaganda' and 'propaganda_probability'.
         """
         # Tokenize input
         inputs = self.tokenizer(
@@ -401,18 +474,49 @@ class PropagandaDetector:
             'propaganda_probability': propaganda_prob
         }
 
+    def predict_folder(self, folder_path: str):
+        """
+        Predict propaganda spans for all articles in a folder.
+
+        Args:
+            folder_path (str): Path to the folder containing article text files.
+
+        Returns:
+            List[str]: A list of labeled spans for all articles.
+        """
+        predictions = []
+        for file_name in os.listdir(folder_path):
+            file_path = os.path.join(folder_path, file_name)
+            if os.path.isfile(file_path):
+                article_id = os.path.splitext(file_name)[0]  # Use the file name (without extension) as the article ID
+                spans = self.predict_spans(article_id, file_path)
+                predictions.extend(spans)
+        return predictions
+
+    def save_predictions(self, output_file: str, predictions: List[str]):
+        """
+        Save predictions to a file.
+
+        Args:
+            output_file (str): Path to the output file.
+            predictions (List[str]): List of predictions in the format "article_id start end".
+        """
+        with open(output_file, "w") as f:
+            f.write("\n".join(predictions) + "\n")
+
 def main():
-    # Example usage
+    # Training setup
     detector = PropagandaDetector(
-        model_name='distilbert-base-uncased',
-        max_span_length=512  # Adjust as needed
+        #model_name="final_model", #select trained model to use
+        resume_from_checkpoint="propaganda_detector/final_model", #or select from where to resume training
+        max_span_length=512
     )
     
     # Train the model
-    detector.train(
-        train_articles_dir='datasets/two-articles',
-        train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
-    )
+    #detector.train(
+    #    train_articles_dir='datasets/train-articles',
+    #    train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
+    #)
     
     # Example predictions
     test_texts = [
@@ -425,19 +529,28 @@ def main():
         print(f"Text: {text}")
         print(f"Prediction: {result}")
 
-    predictions_file = os.path.join(detector.output_dir, "predictions_labels.txt")
-    with open(predictions_file, "w") as pred_file:
-        for article_file in os.listdir('datasets/test-articles'):
-            article_path = os.path.join('datasets/test-articles', article_file)
-            try:
-                with open(article_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except UnicodeDecodeError:
-                with open(article_path, 'r', encoding='latin-1') as f:
-                    text = f.read()
-            result = detector.predict(text)
-            pred_file.write(f"File: {article_file}\n")
-            pred_file.write(f"Prediction: {result}\n\n")
+    test_articles_dir = 'datasets/test-articles'
+    train_articles_dir = 'datasets/train-articles'
+    test_labels_dir = 'datasets/test-task-tc-template.txt'
+
+    print(f"Model max length: {detector.tokenizer.model_max_length}")
+
+    # Loading how the predictions should be like (True labels matched with corresponding parts of the articles)
+    pred_data = detector.load_data(test_articles_dir, test_labels_dir)
+    df = pred_data.to_pandas()
+    predictions_debug = os.path.join(detector.output_dir, "debug_loaded_pred_articles_with_labels.txt")
+
+    # Save the DataFrame to a text file
+    with open(predictions_debug, "w", encoding="utf-8") as f:
+        f.write(df.to_string(index=False))
+
+
+    # Our prediction
+    predictions = detector.predict_folder(train_articles_dir)
+
+    # Save to file
+    output_file = "predictions.txt"
+    detector.save_predictions(output_file, predictions)
 
 if __name__ == "__main__":
     main()
