@@ -10,7 +10,7 @@ from transformers import (
     TrainingArguments, 
     Trainer,
     DataCollatorWithPadding,
-    EarlyStoppingCallback,
+    TrainerCallback
 )
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import (
@@ -301,10 +301,11 @@ class PropagandaDetector:
             test_size: float = 0.1,
             epochs: int = 20, 
             learning_rate: float = 5e-5,
-            early_stopping_patience: int = 15,
+            gradient_accumulation_steps: int = 4,
+            #early_stopping_patience: int = 15,
             lr_decay_patience: int = 5):
         """
-        Train the propaganda detector with advanced training features.
+        Train the propaganda detector using gradient accumulation.
         """
         # Load and tokenize dataset
         dataset = self.load_data(train_articles_dir, train_labels_dir)
@@ -316,20 +317,22 @@ class PropagandaDetector:
         
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
 
-        # Training arguments
+        # Training arguments with gradient accumulation
         training_args = TrainingArguments(
             output_dir=self.output_dir,
             eval_strategy="epoch",
             save_strategy="epoch",
             learning_rate=learning_rate,
-            per_device_train_batch_size=16 if torch.cuda.is_available() else 8,
-            per_device_eval_batch_size=16 if torch.cuda.is_available() else 8,
+            per_device_train_batch_size=32 if torch.cuda.is_available() else 16,
+            per_device_eval_batch_size=32 if torch.cuda.is_available() else 16,
+            auto_find_batch_size=True,
             num_train_epochs=epochs,
             weight_decay=0.01,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             load_best_model_at_end=True,
             metric_for_best_model="f1",
             logging_dir=os.path.join(self.output_dir, "logs"),
-            logging_steps=1,
+            logging_steps=10,
             save_total_limit=15,
             fp16=torch.cuda.is_available(),  # Mixed precision training
             dataloader_num_workers=4 if torch.cuda.is_available() else 0
@@ -342,34 +345,35 @@ class PropagandaDetector:
             return_tensors="pt"
         )
 
-        # Custom metric computation with epoch tracking
-        def compute_metrics_with_epoch(pred):
-            return self.compute_metrics(pred, pred.epoch)
-
-        # Initialize optimizer and scheduler
+        # Optimizer and scheduler
         optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, mode="max", patience=lr_decay_patience, verbose=True
-        )
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=lr_decay_patience, verbose=True)
 
-        # Initialize trainer
+        # Function to update scheduler on evaluation
+        def update_scheduler(trainer, state, control, metrics=None, **kwargs):
+            if metrics and "eval_loss" in metrics:
+                scheduler.step(metrics["eval_loss"])
+
+        # Trainer
         trainer = Trainer(
-            model=self.model,
-            args=training_args,
-            train_dataset=train_test_split["train"],
-            eval_dataset=train_test_split["test"],
-            compute_metrics=compute_metrics_with_epoch,
-            data_collator=data_collator,
-            optimizers=(optimizer, None)  # Scheduler applied separately
+        model=self.model,
+        args=training_args,
+        train_dataset=train_test_split["train"],
+        eval_dataset=train_test_split["test"],
+        compute_metrics=self.compute_metrics,
+        data_collator=data_collator,
+        optimizers=(optimizer, None)  # Scheduler handled separately
         )
+        trainer.add_callback(type('SchedulerCallback', (TrainerCallback,), {'on_evaluate': update_scheduler}))
 
-        # Train with comprehensive logging
+        # Train and evaluate
         trainer.train()
         trainer.evaluate()
 
         # Save final model and tokenizer
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
+
 
     def predict(self, text: str):
         """
