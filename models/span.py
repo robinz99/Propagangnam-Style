@@ -247,19 +247,18 @@ class PropagandaDetector:
         tokens["labels"] = examples["label"]
         return tokens
         
-    def compute_metrics(self, pred, epoch: int) -> Dict[str, float]:
+    def compute_metrics(self, eval_pred):
         """
-        Compute metrics and save epoch-specific classification reports.
-        
+        Compute metrics for the Hugging Face Trainer.
+
         Args:   
-            pred: A PredictionOutput object from the Trainer.
-            epoch: Current training epoch number.
+            eval_pred: Named tuple containing predictions and labels
 
         Returns:
             Dict[str, float]: Dictionary containing accuracy, precision, recall, and F1 score.
         """
-        labels = pred.label_ids
-        preds = pred.predictions.argmax(axis=-1)
+        labels = eval_pred.label_ids
+        preds = eval_pred.predictions.argmax(axis=-1)
 
         labels_flat = labels.flatten()
         preds_flat = preds.flatten()
@@ -269,6 +268,10 @@ class PropagandaDetector:
             labels_flat, preds_flat, average="binary", zero_division=1
         )
 
+        # Get the current epoch from the trainer state
+        trainer = getattr(self, 'trainer', None)
+        epoch = trainer.state.epoch if trainer and hasattr(trainer.state, 'epoch') else 0
+
         # Epoch-specific debug and classification reports
         debug_path = os.path.join(self.output_dir, f"debug_labels_preds_epoch_{epoch}.txt")
         with open(debug_path, "w") as f:
@@ -277,7 +280,7 @@ class PropagandaDetector:
 
         report = classification_report(labels_flat, preds_flat, target_names=["Non-Propaganda", "Propaganda"])
         report_path = os.path.join(self.output_dir, f"classification_report_epoch_{epoch}.txt")
-        
+
         with open(report_path, "w") as f:
             f.write(f"Epoch: {epoch}\n")
             f.write(f"Accuracy: {accuracy}\n")
@@ -302,7 +305,6 @@ class PropagandaDetector:
             epochs: int = 20, 
             learning_rate: float = 5e-5,
             gradient_accumulation_steps: int = 4,
-            #early_stopping_patience: int = 15,
             lr_decay_patience: int = 5):
         """
         Train the propaganda detector using gradient accumulation.
@@ -356,15 +358,14 @@ class PropagandaDetector:
 
         # Trainer
         trainer = Trainer(
-        model=self.model,
-        args=training_args,
-        train_dataset=train_test_split["train"],
-        eval_dataset=train_test_split["test"],
-        compute_metrics=self.compute_metrics,
-        data_collator=data_collator,
-        optimizers=(optimizer, None)  # Scheduler handled separately
+            model=self.model,
+            args=training_args,
+            train_dataset=train_test_split["train"],
+            eval_dataset=train_test_split["test"],
+            compute_metrics=self.compute_metrics,  # No changes here
+            data_collator=data_collator,
+            optimizers=(optimizer, None),  # Scheduler handled separately
         )
-        trainer.add_callback(type('SchedulerCallback', (TrainerCallback,), {'on_evaluate': update_scheduler}))
 
         # Train and evaluate
         trainer.train()
@@ -409,7 +410,7 @@ def main():
     
     # Train the model
     detector.train(
-        train_articles_dir='datasets/train-articles',
+        train_articles_dir='datasets/two-articles',
         train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
     )
     
