@@ -167,3 +167,17 @@ propaganda_detector/checkpoint-96/rng_state.pth
 propaganda_detector/checkpoint-96/scheduler.pt
 propaganda_detector/checkpoint-96/trainer_state.json
 propaganda_detector/checkpoint-96/training_args.bin
+propaganda_detector/checkpoint-1/config.json
+propaganda_detector/checkpoint-1/model.safetensors
+propaganda_detector/checkpoint-1/optimizer.pt
+propaganda_detector/checkpoint-1/rng_state.pth
+propaganda_detector/checkpoint-1/scheduler.pt
+propaganda_detector/checkpoint-1/trainer_state.json
+propaganda_detector/checkpoint-1/training_args.bin
+propaganda_detector/checkpoint-2/config.json
+propaganda_detector/checkpoint-2/model.safetensors
+propaganda_detector/checkpoint-2/optimizer.pt
+propaganda_detector/checkpoint-2/rng_state.pth
+propaganda_detector/checkpoint-2/scheduler.pt
+propaganda_detector/checkpoint-2/trainer_state.json
+propaganda_detector/checkpoint-2/training_args.bin
