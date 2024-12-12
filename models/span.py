@@ -408,5 +408,19 @@ def main():
         print(f"Text: {text}")
         print(f"Prediction: {result}")
 
+    predictions_file = os.path.join(detector.output_dir, "predictions_labels.txt")
+    with open(predictions_file, "w") as pred_file:
+        for article_file in os.listdir('datasets/dev-articles'):
+            article_path = os.path.join('datasets/dev-articles', article_file)
+            try:
+                with open(article_path, 'r', encoding='utf-8') as f:
+                    text = f.read()
+            except UnicodeDecodeError:
+                with open(article_path, 'r', encoding='latin-1') as f:
+                    text = f.read()
+            result = detector.predict(text)
+            pred_file.write(f"File: {article_file}\n")
+            pred_file.write(f"Prediction: {result}\n\n")
+
 if __name__ == "__main__":
     main()
