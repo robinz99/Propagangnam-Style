@@ -1,6 +1,6 @@
 import os
 import torch
-import numpy as np
+#import numpy as np
 import pandas as pd
 from typing import Optional, Dict, Any, List
 
@@ -171,11 +171,11 @@ class PropagandaDetector:
             train_articles_dir: str, 
             train_labels_dir: str, 
             test_size: float = 0.1,
-            epochs: int = 2, 
+            epochs: int = 1, 
             learning_rate: float = 1e-3,
-            gradient_accumulation_steps: int = 10):
+            gradient_accumulation_steps: int = 5):
         """
-        Train the propaganda detector.
+        Train the propaganda detector with detailed epoch logging.
         """
         # Load and tokenize dataset
         dataset = self.load_data(train_articles_dir, train_labels_dir)
@@ -189,14 +189,14 @@ class PropagandaDetector:
         train_dataset = train_test_split["train"]
         train_dataset = train_dataset.shuffle(seed=42)  # data is shuffled per epoch
 
-        # Training arguments with gradient accumulation
+        # Training arguments with detailed logging
         training_args = TrainingArguments(
             output_dir=self.output_dir,
             eval_strategy="epoch",
             save_strategy="epoch",
             learning_rate=learning_rate,
-            per_device_train_batch_size=64 if torch.cuda.is_available() else 32,
-            per_device_eval_batch_size=64 if torch.cuda.is_available() else 32,
+            per_device_train_batch_size=32 if torch.cuda.is_available() else 16,
+            per_device_eval_batch_size=32 if torch.cuda.is_available() else 16,
             auto_find_batch_size=True,
             num_train_epochs=epochs,
             weight_decay=0.01,
@@ -208,23 +208,27 @@ class PropagandaDetector:
             save_total_limit=15,
             fp16=torch.cuda.is_available(),
             fp16_opt_level="O1",
-            dataloader_num_workers=16
+            dataloader_num_workers=8
         )
 
         # Trainer
         trainer = Trainer(
             model=self.model,
             args=training_args,
-            train_dataset=train_test_split["train"],
+            train_dataset=train_dataset,
             eval_dataset=train_test_split["test"],
             compute_metrics=self.compute_metrics,
-                collator=DataCollatorWithPadding(
+            data_collator=DataCollatorWithPadding(
                 tokenizer=self.tokenizer, 
                 padding=True
             )
         )
 
         # Train and evaluate
+        print(f"\n{'='*50}")
+        print(f"Starting Training for {epochs} Epochs")
+        print(f"{'='*50}\n")
+        
         trainer.train()
         trainer.evaluate()
 
@@ -235,7 +239,7 @@ class PropagandaDetector:
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
         self.model.save_pretrained(os.path.join(self.output_dir, "final_model"))
-
+        
     def log_epoch_metrics(self):
         """
         Log epoch metrics in a formatted table.
@@ -282,22 +286,27 @@ class PropagandaDetector:
         }
 
 def main():
-    # Example usage
+    # Training setup
     detector = PropagandaDetector(
-        model_name='distilbert-base-uncased',
-        max_span_length=512
+        #model_name="distilbert-base-uncased",
+        resume_from_checkpoint="propaganda_detector/final_model"
     )
     
     # Train the model
     detector.train(
         train_articles_dir='datasets/train-articles',
-        train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
+        train_labels_dir='datasets/all_in_one_labels/all_labels.txt',
+        epochs = 60,
+        test_size = .1,
+        learning_rate = 2e-8,
+        gradient_accumulation_steps = 5,
+        
     )
     
     # Example predictions
     test_texts = [
         "Puppies are cute.",
-        " when (the plague) comes again it starts from more stock, and the magnitude in the next transmission could be higher than the one that we saw."
+        "when (the plague) comes again it starts from more stock, and the magnitude in the next transmission could be higher than the one that we saw."
     ]
     
     for text in test_texts:
