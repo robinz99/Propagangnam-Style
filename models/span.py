@@ -232,18 +232,20 @@ class PropagandaDetector:
         Returns:
             Tokenized examples ready for model training.
         """
-        return self.tokenizer(
-            examples['text'], 
+        tokens = self.tokenizer(
+             examples['text'], 
             truncation=True, 
             padding=True, 
             max_length=self.max_span_length
-        )
+            )
+        tokens["labels"] = examples["label"]
+        return tokens
         
     def compute_metrics(self, pred) -> Dict[str, float]:
         """
         Compute detailed metrics for span classification and save debug info.
 
-        Args:
+        Args:   
             pred: A PredictionOutput object from the Trainer.
 
         Returns:
@@ -315,8 +317,9 @@ class PropagandaDetector:
         # Define training arguments
         training_args = TrainingArguments(
             output_dir=self.output_dir,
-            eval_strategy="epoch",
-            save_strategy="epoch",
+            eval_strategy="steps",
+            eval_steps= 10,
+            save_strategy="steps",
             learning_rate=learning_rate,
             per_device_train_batch_size=16,
             per_device_eval_batch_size=16,
@@ -349,6 +352,7 @@ class PropagandaDetector:
 
         # Train the model using Trainer (no need to manually calculate loss)
         trainer.train()
+        trainer.evaluate()
 
         # Save model
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
@@ -384,12 +388,12 @@ def main():
     # Example usage
     detector = PropagandaDetector(
         model_name='distilbert-base-uncased',
-        max_span_length=1024  # Adjust as needed
+        max_span_length=512  # Adjust as needed
     )
     
     # Train the model
     detector.train(
-        train_articles_dir='datasets/two-articles',
+        train_articles_dir='datasets/train-articles',
         train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
     )
     
