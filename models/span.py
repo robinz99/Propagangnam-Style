@@ -427,8 +427,8 @@ def main():
 
     predictions_file = os.path.join(detector.output_dir, "predictions_labels.txt")
     with open(predictions_file, "w") as pred_file:
-        for article_file in os.listdir('datasets/dev-articles'):
-            article_path = os.path.join('datasets/dev-articles', article_file)
+        for article_file in os.listdir('datasets/test-articles'):
+            article_path = os.path.join('datasets/test-articles', article_file)
             try:
                 with open(article_path, 'r', encoding='utf-8') as f:
                     text = f.read()
