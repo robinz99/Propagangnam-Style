@@ -1,17 +1,16 @@
 import os
 import torch
-import numpy as np
-from typing import Optional, Dict, Any
+#import numpy as np
+import pandas as pd
+from typing import Optional, Dict, Any, List
 
-from datasets import load_dataset, Dataset
+from datasets import Dataset
 from transformers import (
-    GPT2TokenizerFast,
-    GPT2ForTokenClassification, 
-    AutoModelForTokenClassification,
     AutoTokenizer,
+    AutoModelForSequenceClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorForTokenClassification
+    DataCollatorWithPadding
 )
 from sklearn.metrics import (
     accuracy_score, 
@@ -21,344 +20,310 @@ from sklearn.metrics import (
 
 class PropagandaDetector:
     def __init__(self, 
-                 model_name: str = 'distilgpt2', 
+                 model_name: str = 'distilbert-base-uncased', 
                  output_dir: str = "propaganda_detector",
+                 max_span_length: int = 512,
                  resume_from_checkpoint: Optional[str] = None):
         """
         Initialize the Propaganda Detector.
-        
-        Args:
-            model_name (str): Base model to use
-            output_dir (str): Directory to save model and outputs
-            resume_from_checkpoint (str, optional): Path to checkpoint to resume training
         """
-        # Check if CUDA is available and set device
+        # Check CUDA availability
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
+        print(f"CUDA Available: {torch.cuda.is_available()}")
         if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
-        else:
-            self.device = torch.device("cpu")
-            print("CUDA not available, using CPU")
+            print(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
+            print(f"CUDA Device Capability: {torch.cuda.get_device_capability(0)}")
 
+        # Create output directory
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
+        
+        self.max_span_length = max_span_length
 
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-            self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        self.tokenizer.pad_token = self.tokenizer.pad_token or self.tokenizer.eos_token
 
         # Initialize or load model
-        if resume_from_checkpoint:
-            self.model = AutoModelForTokenClassification.from_pretrained(resume_from_checkpoint)
-            print(f"Loaded model from checkpoint: {resume_from_checkpoint}")
-        else:
-            self.model = GPT2ForTokenClassification.from_pretrained(
-                model_name, num_labels=2
-            )
-            print(f"Initialized new model from {model_name}")
+        self.model = AutoModelForSequenceClassification.from_pretrained(
+            resume_from_checkpoint or model_name, 
+            num_labels=2
+        )
         
         self.model.resize_token_embeddings(len(self.tokenizer))
+        self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(self.device)
-        print(f"Model moved to {self.device}")
 
-    def load_data(self, articles_dir, labels_dir):
-        data_dict = {
-            'text': [],
-            'labels': []
-        }
+        # Store metrics for logging
+        self.epoch_metrics = []
+
+    def load_data(self, articles_dir: str, train_labels_dir: str) -> Dataset:
+        """
+        Loads articles and corresponding labels from the directories.
+        Returns a HuggingFace Dataset object.
+        """
+        data_dict = {'text': [], 'label': []}
+        article_labels = {}
+
+        # Read label spans
+        with open(train_labels_dir, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 3:
+                    article_id, start, end = parts[0], int(parts[1]), int(parts[2])
+                    article_labels.setdefault(article_id, []).append((start, end))
+
+        # Process each article
         for article_file in os.listdir(articles_dir):
-            for article_file in os.listdir(articles_dir):
-                # Extract the article ID (e.g., "article111111117")
-                article_id = article_file.split('.')[0]
-                # Construct the corresponding label file name with ".task1-SI"
-                label_file = os.path.join(labels_dir, f"{article_id}.task1-SI.labels")
-                # print(f"Article file: {article_file}")
-                # print(f"Expected label file: {label_file}")
-                # print(f"Label file exists: {os.path.exists(label_file)}")
+            if not (article_file.startswith('article') and article_file.endswith('.txt')):
+                continue
 
-            try:
-                with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except UnicodeDecodeError:
-                with open(os.path.join(articles_dir, article_file), 'r', encoding='latin-1') as f:
-                    text = f.read()
+            # Extract article ID 
+            article_id = article_file[7:-4]  # Remove 'article' prefix and '.txt' suffix
+            
+            # Read article text
+            with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
+                text = f.read()
 
-            labels = [0] * len(text)
-            if os.path.exists(label_file):
-              print(f"Contents of {label_file}:")
-              with open(label_file, 'r', encoding='utf-8') as f:
-                  print(f.read())
-              try:
-                  with open(label_file, 'r', encoding='utf-8') as f:
-                      for line in f:
-                          parts = line.strip().split('\t')
-                          # Extract start and end indices if available
-                          if len(parts) >= 3:
-                              start, end = map(int, parts[1:3])
-                              # Update labels array for the specified range
-                              labels[start:end] = [1] * (end - start)
-              except UnicodeDecodeError:
-                  with open(label_file, 'r', encoding='latin-1') as f:
-                      for line in f:
-                          parts = line.strip().split('\t')
-                          # Extract start and end indices if available
-                          if len(parts) >= 3:
-                              start, end = map(int, parts[1:3])
-                              # Update labels array for the specified range
-                              labels[start:end] = [1] * (end - start)
+            # If there are labels for this article
+            if article_id in article_labels:
+                # Sort the spans by the start value
+                propaganda_spans = sorted(article_labels[article_id], key=lambda x: x[0])
+                last_end = 0  # Track the end of the last span
 
-            data_dict['text'].append(text)
-            data_dict['labels'].append(labels)
+                # Add non-propaganda text before and between the propaganda spans
+                for start, end in propaganda_spans:
+                    # Non-propaganda span before the current propaganda span
+                    if start > last_end:
+                        non_prop_span = text[last_end:start]
+                        if non_prop_span.strip():
+                            data_dict['text'].append(non_prop_span)
+                            data_dict['label'].append(0)  # Non-propaganda
+                    
+                    # Add propaganda span
+                    prop_span = text[start:end]
+                    data_dict['text'].append(prop_span)
+                    data_dict['label'].append(1)  # Propaganda
+                    
+                    last_end = end
+
+                # Add final non-propaganda span after the last propaganda span
+                if last_end < len(text):
+                    final_non_prop_span = text[last_end:]
+                    if final_non_prop_span.strip():
+                        data_dict['text'].append(final_non_prop_span)
+                        data_dict['label'].append(0)  # Non-propaganda
 
         if not data_dict['text']:
-            raise ValueError("No data loaded. Ensure the dataset paths are correct.")
+            raise ValueError("No data loaded. Check dataset paths.")
 
         return Dataset.from_dict(data_dict)
 
-    def tokenize_and_align_labels(self, examples: Dict[str, Any], tokenizer) -> Dict[str, torch.Tensor]:
+    def tokenize_data(self, examples):
         """
-        Tokenize inputs and align labels, logging debug information to a file.
+        Tokenizes a batch of examples.
         """
-        debug_file_path = os.path.join(self.output_dir, "debug_tokenization.txt")
-        
-        # Tokenize inputs
-        tokenized_inputs = tokenizer(
-            examples["text"],
-            truncation=True,
-            max_length=512,
-            padding="max_length",
-            return_tensors="pt"
+        tokens = self.tokenizer(
+            examples['text'], 
+            truncation=True, 
+            padding=True, 
+            max_length=self.max_span_length
         )
+        tokens["labels"] = examples["label"]
+        return tokens
         
-        labels = []
-        
-        # Append debug information
-        with open(debug_file_path, "a") as f:
-            f.write("=== Tokenizing Example ===\n")
-            f.write(f"Number of texts: {len(examples['text'])}\n")
-        
-        # Process each example
-        for i, label in enumerate(examples["labels"]):
-            # Open and close file for each iteration
-            with open(debug_file_path, "a") as f:
-                f.write(f"\nAligning Labels for Example {i}:\n")
-                f.write(f"Original Labels: {label}\n")
-            
-            word_ids = tokenized_inputs.word_ids(batch_index=i)
-            label_ids = []
-            previous_word_idx = None
-            
-            for word_idx in word_ids:
-                if word_idx is None:
-                    label_ids.append(-100)
-                else:
-                    label_ids.append(label[word_idx])
-                    previous_word_idx = word_idx
-
-            label_ids += [-100] * (512 - len(label_ids))
-            
-            # Log aligned labels
-            with open(debug_file_path, "a") as f:
-                f.write(f"Aligned Labels: {label_ids}\n")
-            
-            labels.append(label_ids)
-        
-        # Log end of tokenization
-        with open(debug_file_path, "a") as f:
-            f.write("=== End of Tokenization ===\n\n")
-        
-        tokenized_inputs["labels"] = labels
-        
-        return tokenized_inputs
-
-    def compute_metrics(self, pred) -> Dict[str, float]:
+    def compute_metrics(self, eval_pred):
         """
-        Compute detailed metrics for token classification and save debug info.
+        Compute and log metrics for the Hugging Face Trainer.
         """
-        labels = pred.label_ids
-        preds = pred.predictions.argmax(-1)
+        labels = eval_pred.label_ids
+        preds = eval_pred.predictions.argmax(axis=-1)
 
-        # Flatten and remove ignored indices
-        labels_flat = [label for sublist in labels for label in sublist if label != -100]
-        preds_flat = [pred for sublist, label_sublist in zip(preds, labels) 
-                      for pred, label in zip(sublist, label_sublist) if label != -100]
-
-        # Save labels and predictions for debugging
-        debug_path = os.path.join(self.output_dir, "debug_labels_preds.txt")
-        with open(debug_path, "w") as f:
-            for i, (true, pred) in enumerate(zip(labels_flat, preds_flat)):
-                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
+        labels_flat = labels.flatten()
+        preds_flat = preds.flatten()
 
         # Compute metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            labels_flat, preds_flat, average='binary', zero_division=1
+            labels_flat, preds_flat, average="binary", zero_division=1
         )
 
-        # Log detailed results
-        report = classification_report(labels_flat, preds_flat)
-        with open(os.path.join(self.output_dir, 'classification_report.txt'), 'w') as f:
-            f.write(f"Accuracy: {accuracy}\n")
-            f.write(f"Precision: {precision}\n")
-            f.write(f"Recall: {recall}\n")
-            f.write(f"F1 Score: {f1}\n\n")
-            f.write("Detailed Classification Report:\n")
-            f.write(report)
-    
-        return {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1': f1
+        # Create a dictionary of metrics to log
+        metrics = {
+            "accuracy": accuracy,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1
         }
 
+        # Log classification report
+        report = classification_report(labels_flat, preds_flat, target_names=["Non-Propaganda", "Propaganda"])
+        print("\nClassification Report:")
+        print(report)
+
+        # Store metrics for later use
+        self.epoch_metrics.append(metrics)
+
+        return metrics
 
     def train(self, 
-          train_articles_dir: str, 
-          train_labels_dir: str, 
-          test_size: float = 0.1,
-          epochs: int = 1,
-          learning_rate: float = 5e-3) -> None:
+              train_articles_dir: str, 
+              train_labels_dir: str, 
+              test_size: float = 0.1,
+              epochs: int = 1, 
+              learning_rate: float = 1e-3,
+              gradient_accumulation_steps: int = 5,
+              early_stopping_patience: int = 3):
         """
-        Train the propaganda detector and log outputs for debugging.
+        Train the propaganda detector with overfitting prevention mechanisms.
         """
-        # Load dataset
+        # Load and tokenize dataset
         dataset = self.load_data(train_articles_dir, train_labels_dir)
-        
-        # Tokenize and align labels
         tokenized_dataset = dataset.map(
-            lambda x: self.tokenize_and_align_labels(x, self.tokenizer),
-            batched=True,
+            self.tokenize_data, 
+            batched=True, 
             remove_columns=dataset.column_names
         )
-
-        # Split dataset
+        
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
+        train_dataset = train_test_split["train"]
+        train_dataset = train_dataset.shuffle(seed=42)  # data shuffling
 
-        # Define training arguments
+        # Training arguments with early stopping and learning rate scheduling
         training_args = TrainingArguments(
             output_dir=self.output_dir,
             eval_strategy="epoch",
             save_strategy="epoch",
-            logging_dir=os.path.join(self.output_dir, "logs"),
             learning_rate=learning_rate,
-            per_device_train_batch_size=16,
-            per_device_eval_batch_size=16,
+            lr_scheduler_type="linear",  # Linear learning rate decay
+            warmup_steps=500,  # Warmup steps before starting decay
+            per_device_train_batch_size=32 if torch.cuda.is_available() else 16,
+            per_device_eval_batch_size=32 if torch.cuda.is_available() else 16,
+            auto_find_batch_size=True,
             num_train_epochs=epochs,
-            weight_decay=0.001,
+            weight_decay=0.01,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            gradient_checkpointing=True,  # Reduces memory footprint
+            gradient_clipping=1.0,  # Clip gradients to prevent exploding gradients
             load_best_model_at_end=True,
             metric_for_best_model="f1",
-            logging_steps=10,
-            report_to="none",
+            logging_dir=os.path.join(self.output_dir, "logs"),
+            logging_steps=5,
+            save_total_limit=5,
+            fp16=torch.cuda.is_available(), # use fp16 with CUDA
+            fp16_opt_level="O1",
+            dataloader_num_workers=8
         )
 
-        # Initialize data collator and trainer
-        data_collator = DataCollatorForTokenClassification(
-            tokenizer=self.tokenizer,
-            padding=True,
-            return_tensors="pt"
+        # Trainer with Early Stopping
+        early_stopping_callback = transformers.EarlyStoppingCallback(
+            early_stopping_patience=early_stopping_patience
         )
-
-        # Inspect the tokenized dataset
-        for i, example in enumerate(tokenized_dataset):
-          print(f"Example {i}: input_ids={len(example['input_ids'])}, labels={len(example['labels'])}")
-
+        
         trainer = Trainer(
             model=self.model,
             args=training_args,
-            train_dataset=train_test_split["train"],
+            train_dataset=train_dataset,
             eval_dataset=train_test_split["test"],
-            data_collator=data_collator,
             compute_metrics=self.compute_metrics,
+            data_collator=DataCollatorWithPadding(
+                tokenizer=self.tokenizer, 
+                padding=True
+            ),
+            callbacks=[early_stopping_callback]
         )
 
-        print("\nStarting training...")
-        print(f"Training on device: {self.device}")
-
-        # Train and save
+        # Train and evaluate
+        print(f"\n{'='*50}")
+        print(f"Starting Training for {epochs} Epochs")
+        print(f"{'='*50}\n")
+        
         trainer.train()
+        trainer.evaluate()
+
+        # Log epoch metrics in a table
+        self.log_epoch_metrics()
+
+        # Save final model and tokenizer
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
+        self.model.save_pretrained(os.path.join(self.output_dir, "final_model"))
 
-        # Save test set labels and predictions
-        predictions, labels, _ = trainer.predict(train_test_split["test"])
-        predictions = predictions.argmax(-1)
-        debug_eval_file = os.path.join(self.output_dir, "debug_eval_predictions.txt")
-        with open(debug_eval_file, "w") as f:
-            for i, (true, pred) in enumerate(zip(labels.flatten(), predictions.flatten())):
-                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
-
-    print("\nTraining completed!")
-
-
-    def predict(self, text: str) -> Dict[str, Any]:
+        
+    def log_epoch_metrics(self):
         """
-        Predict propaganda spans in given text.
-        Args: text (str): Input text to classify
-        Returns: dict: Prediction results with spans
+        Log epoch metrics in a formatted table.
+        """
+        if not self.epoch_metrics:
+            return
+
+        # Create a DataFrame from epoch metrics
+        metrics_df = pd.DataFrame(self.epoch_metrics)
+        metrics_df.index.name = 'Epoch'
+        metrics_df.index += 1  # Start indexing from 1
+
+        # Save to CSV
+        metrics_path = os.path.join(self.output_dir, "epoch_metrics.csv")
+        metrics_df.to_csv(metrics_path)
+
+        # Pretty print
+        print("\nEpoch Metrics:")
+        print(metrics_df.to_string())
+
+    def predict(self, text: str):
+        """
+        Predict if a given text span contains propaganda
         """
         # Tokenize input
         inputs = self.tokenizer(
             text, 
             return_tensors="pt", 
             truncation=True, 
-            max_length=512
-        ).to(self.device)  # Move inputs to GPU if available
+            padding=True
+        ).to(self.device)
 
         # Predict
         with torch.no_grad():
             outputs = self.model(**inputs)
         
-        # Process predictions
-        predictions = torch.argmax(outputs.logits, dim=-1)[0].cpu().numpy()
-        tokens = self.tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
-        
-        # Extract propaganda spans
-        propaganda_spans = []
-        current_span = None
-        for i, (token, pred) in enumerate(zip(tokens, predictions)):
-            if pred == 1:  # Propaganda token
-                if current_span is None:
-                    current_span = {
-                        'start': i,
-                        'tokens': [token]
-                    }
-                else:
-                    current_span['tokens'].append(token)
-            else:
-                if current_span:
-                    current_span['end'] = i - 1
-                    current_span['text'] = self.tokenizer.convert_tokens_to_string(current_span['tokens'])
-                    propaganda_spans.append(current_span)
-                    current_span = None
-        
-        # Handle last span if it ends at the last token
-        if current_span:
-            current_span['end'] = len(tokens) - 1
-            current_span['text'] = self.tokenizer.convert_tokens_to_string(current_span['tokens'])
-            propaganda_spans.append(current_span)
+        # Get prediction
+        prediction = torch.softmax(outputs.logits, dim=1)
+        propaganda_prob = prediction[0][1].item()
         
         return {
-            'propaganda_spans': propaganda_spans,
-            'has_propaganda': len(propaganda_spans) > 0
+            'has_propaganda': propaganda_prob > 0.5,
+            'propaganda_probability': propaganda_prob
         }
 
 def main():
-    # Example usage
-    detector = PropagandaDetector()
+    # Training setup
+    detector = PropagandaDetector(
+        model_name="distilgpt2",
+        #resume_from_checkpoint="propaganda_detector/final_model"
+    )
     
     # Train the model
     detector.train(
         train_articles_dir='datasets/train-articles',
-        train_labels_dir='datasets/train-labels-task1-span-identification'
+        train_labels_dir='datasets/all_in_one_labels/all_labels.txt',
+        epochs = 2,
+        test_size = .1,
+        learning_rate = 5e-4,
+        gradient_accumulation_steps = 5,
+        
     )
     
-    # Example prediction
-    sample_text = "This is a sample text to demonstrate propaganda detection."
-    result = detector.predict(sample_text)
-    print(result)
+    # Example predictions
+    test_texts = [
+        "Puppies are cute.",
+        "when (the plague) comes again it starts from more stock, and the magnitude in the next transmission could be higher than the one that we saw."
+    ]
+    
+    for text in test_texts:
+        result = detector.predict(text)
+        print(f"Text: {text}")
+        print(f"Prediction: {result}")
 
 if __name__ == "__main__":
     main()
