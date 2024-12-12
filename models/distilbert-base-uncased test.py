@@ -1,8 +1,7 @@
 import os
 import torch
-#import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Any, List
+from typing import Optional
 
 from datasets import Dataset
 from transformers import (
@@ -10,7 +9,8 @@ from transformers import (
     AutoModelForSequenceClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorWithPadding
+    DataCollatorWithPadding,
+    EarlyStoppingCallback,
 )
 from sklearn.metrics import (
     accuracy_score, 
@@ -20,7 +20,7 @@ from sklearn.metrics import (
 
 class PropagandaDetector:
     def __init__(self, 
-                 model_name: str = 'distilbert-base-uncased', 
+                 model_name: str = "distilbert-base-uncased", 
                  output_dir: str = "propaganda_detector",
                  max_span_length: int = 512,
                  resume_from_checkpoint: Optional[str] = None):
@@ -63,27 +63,27 @@ class PropagandaDetector:
         Loads articles and corresponding labels from the directories.
         Returns a HuggingFace Dataset object.
         """
-        data_dict = {'text': [], 'label': []}
+        data_dict = {"text": [], "label": []}
         article_labels = {}
 
         # Read label spans
-        with open(train_labels_dir, 'r', encoding='utf-8') as f:
+        with open(train_labels_dir, "r", encoding="utf-8") as f:
             for line in f:
-                parts = line.strip().split('\t')
+                parts = line.strip().split("\t")
                 if len(parts) == 3:
                     article_id, start, end = parts[0], int(parts[1]), int(parts[2])
                     article_labels.setdefault(article_id, []).append((start, end))
 
         # Process each article
         for article_file in os.listdir(articles_dir):
-            if not (article_file.startswith('article') and article_file.endswith('.txt')):
+            if not (article_file.startswith("article") and article_file.endswith(".txt")):
                 continue
 
             # Extract article ID 
-            article_id = article_file[7:-4]  # Remove 'article' prefix and '.txt' suffix
+            article_id = article_file[7:-4]  # Remove "article" prefix and ".txt" suffix
             
             # Read article text
-            with open(os.path.join(articles_dir, article_file), 'r', encoding='utf-8') as f:
+            with open(os.path.join(articles_dir, article_file), "r", encoding="utf-8") as f:
                 text = f.read()
 
             # If there are labels for this article
@@ -98,13 +98,13 @@ class PropagandaDetector:
                     if start > last_end:
                         non_prop_span = text[last_end:start]
                         if non_prop_span.strip():
-                            data_dict['text'].append(non_prop_span)
-                            data_dict['label'].append(0)  # Non-propaganda
+                            data_dict["text"].append(non_prop_span)
+                            data_dict["label"].append(0)  # Non-propaganda
                     
                     # Add propaganda span
                     prop_span = text[start:end]
-                    data_dict['text'].append(prop_span)
-                    data_dict['label'].append(1)  # Propaganda
+                    data_dict["text"].append(prop_span)
+                    data_dict["label"].append(1)  # Propaganda
                     
                     last_end = end
 
@@ -112,10 +112,10 @@ class PropagandaDetector:
                 if last_end < len(text):
                     final_non_prop_span = text[last_end:]
                     if final_non_prop_span.strip():
-                        data_dict['text'].append(final_non_prop_span)
-                        data_dict['label'].append(0)  # Non-propaganda
+                        data_dict["text"].append(final_non_prop_span)
+                        data_dict["label"].append(0)  # Non-propaganda
 
-        if not data_dict['text']:
+        if not data_dict["text"]:
             raise ValueError("No data loaded. Check dataset paths.")
 
         return Dataset.from_dict(data_dict)
@@ -125,7 +125,7 @@ class PropagandaDetector:
         Tokenizes a batch of examples.
         """
         tokens = self.tokenizer(
-            examples['text'], 
+            examples["text"], 
             truncation=True, 
             padding=True, 
             max_length=self.max_span_length
@@ -171,10 +171,10 @@ class PropagandaDetector:
               train_articles_dir: str, 
               train_labels_dir: str, 
               test_size: float = 0.1,
-              epochs: int = 1, 
+              epochs: int = 10, 
               learning_rate: float = 1e-3,
               gradient_accumulation_steps: int = 5,
-              early_stopping_patience: int = 3):
+              early_stopping_patience: int = 6):
         """
         Train the propaganda detector with overfitting prevention mechanisms.
         """
@@ -188,7 +188,7 @@ class PropagandaDetector:
         
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
         train_dataset = train_test_split["train"]
-        train_dataset = train_dataset.shuffle(seed=42)  # data shuffling
+        train_dataset = train_dataset.shuffle(seed=42)  # data is shuffled per epoch
 
         # Training arguments with early stopping and learning rate scheduling
         training_args = TrainingArguments(
@@ -196,28 +196,28 @@ class PropagandaDetector:
             eval_strategy="epoch",
             save_strategy="epoch",
             learning_rate=learning_rate,
-            lr_scheduler_type="linear",  # Linear learning rate decay
+            lr_scheduler_type="cosine",  # Linear learning rate decay
             warmup_steps=500,  # Warmup steps before starting decay
-            per_device_train_batch_size=32 if torch.cuda.is_available() else 16,
-            per_device_eval_batch_size=32 if torch.cuda.is_available() else 16,
+            per_device_train_batch_size=128 if torch.cuda.is_available() else 16,
+            per_device_eval_batch_size=128 if torch.cuda.is_available() else 16,
             auto_find_batch_size=True,
             num_train_epochs=epochs,
             weight_decay=0.01,
             gradient_accumulation_steps=gradient_accumulation_steps,
             gradient_checkpointing=True,  # Reduces memory footprint
-            gradient_clipping=1.0,  # Clip gradients to prevent exploding gradients
+            max_grad_norm=1.0,  # Clip gradients to prevent exploding gradients
             load_best_model_at_end=True,
             metric_for_best_model="f1",
             logging_dir=os.path.join(self.output_dir, "logs"),
-            logging_steps=5,
+            logging_steps=1,
             save_total_limit=5,
-            fp16=torch.cuda.is_available(), # use fp16 with CUDA
+            fp16=torch.cuda.is_available(),
             fp16_opt_level="O1",
             dataloader_num_workers=8
         )
 
         # Trainer with Early Stopping
-        early_stopping_callback = transformers.EarlyStoppingCallback(
+        early_stopping_callback = EarlyStoppingCallback(
             early_stopping_patience=early_stopping_patience
         )
         
@@ -260,7 +260,7 @@ class PropagandaDetector:
 
         # Create a DataFrame from epoch metrics
         metrics_df = pd.DataFrame(self.epoch_metrics)
-        metrics_df.index.name = 'Epoch'
+        metrics_df.index.name = "Epoch"
         metrics_df.index += 1  # Start indexing from 1
 
         # Save to CSV
@@ -292,24 +292,24 @@ class PropagandaDetector:
         propaganda_prob = prediction[0][1].item()
         
         return {
-            'has_propaganda': propaganda_prob > 0.5,
-            'propaganda_probability': propaganda_prob
+            "has_propaganda": propaganda_prob > 0.5,
+            "propaganda_probability": propaganda_prob
         }
 
 def main():
     # Training setup
     detector = PropagandaDetector(
-        model_name="distilgpt2",
+        model_name="distilbert-base-uncased",
         #resume_from_checkpoint="propaganda_detector/final_model"
     )
     
     # Train the model
     detector.train(
-        train_articles_dir='datasets/train-articles',
-        train_labels_dir='datasets/all_in_one_labels/all_labels.txt',
-        epochs = 2,
+        train_articles_dir="datasets/train-articles",
+        train_labels_dir="datasets/all_in_one_labels/all_labels.txt",
+        epochs = 50,
         test_size = .1,
-        learning_rate = 5e-4,
+        learning_rate = 1e-5,
         gradient_accumulation_steps = 5,
         
     )
