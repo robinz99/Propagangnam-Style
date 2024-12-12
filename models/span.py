@@ -9,8 +9,10 @@ from transformers import (
     AutoModelForSequenceClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorWithPadding
+    DataCollatorWithPadding,
+    TrainerCallback
 )
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import (
     accuracy_score, 
     precision_recall_fscore_support, 
@@ -35,6 +37,10 @@ class PropagandaDetector:
         # Check if CUDA is available and set device
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
+        print(f"CUDA Available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"CUDA Device Name: {torch.cuda.get_device_name(0)}")
+            print(f"CUDA Device Capability: {torch.cuda.get_device_capability(0)}")
 
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
@@ -241,41 +247,42 @@ class PropagandaDetector:
         tokens["labels"] = examples["label"]
         return tokens
         
-    def compute_metrics(self, pred) -> Dict[str, float]:
+    def compute_metrics(self, eval_pred):
         """
-        Compute detailed metrics for span classification and save debug info.
+        Compute metrics for the Hugging Face Trainer.
 
         Args:   
-            pred: A PredictionOutput object from the Trainer.
+            eval_pred: Named tuple containing predictions and labels
 
         Returns:
             Dict[str, float]: Dictionary containing accuracy, precision, recall, and F1 score.
         """
-        labels = pred.label_ids  # True labels
-        preds = pred.predictions.argmax(axis=-1)  # Predicted labels
+        labels = eval_pred.label_ids
+        preds = eval_pred.predictions.argmax(axis=-1)
 
-        # Flatten lists (if needed for compatibility with datasets)
         labels_flat = labels.flatten()
         preds_flat = preds.flatten()
 
-        # Compute metrics at the span level
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
             labels_flat, preds_flat, average="binary", zero_division=1
         )
 
-        # Save detailed results for debugging
-        debug_path = os.path.join(self.output_dir, "debug_labels_preds.txt")
+        # Get the current epoch from the trainer state
+        trainer = getattr(self, 'trainer', None)
+        epoch = trainer.state.epoch if trainer and hasattr(trainer.state, 'epoch') else 0
+
+        # Epoch-specific debug and classification reports
+        debug_path = os.path.join(self.output_dir, f"debug_labels_preds_epoch_{epoch}.txt")
         with open(debug_path, "w") as f:
             for i, (true, pred) in enumerate(zip(labels_flat, preds_flat)):
                 f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
 
-        # Generate a classification report
         report = classification_report(labels_flat, preds_flat, target_names=["Non-Propaganda", "Propaganda"])
+        report_path = os.path.join(self.output_dir, f"classification_report_epoch_{epoch}.txt")
 
-        # Save classification report for detailed evaluation
-        report_path = os.path.join(self.output_dir, "classification_report.txt")
         with open(report_path, "w") as f:
+            f.write(f"Epoch: {epoch}\n")
             f.write(f"Accuracy: {accuracy}\n")
             f.write(f"Precision: {precision}\n")
             f.write(f"Recall: {recall}\n")
@@ -283,7 +290,6 @@ class PropagandaDetector:
             f.write("Detailed Classification Report:\n")
             f.write(report)
 
-        # Return the metrics
         return {
             "accuracy": accuracy,
             "precision": precision,
@@ -293,68 +299,79 @@ class PropagandaDetector:
 
 
     def train(self, 
-          train_articles_dir: str, 
-          train_labels_dir: str, 
-          test_size: float = 0.1,
-          epochs: int = 1,
-          learning_rate: float = 5e-5):
+            train_articles_dir: str, 
+            train_labels_dir: str, 
+            test_size: float = 0.1,
+            epochs: int = 20, 
+            learning_rate: float = 5e-5,
+            gradient_accumulation_steps: int = 4,
+            lr_decay_patience: int = 5):
         """
-        Train the propaganda detector
+        Train the propaganda detector using gradient accumulation.
         """
-        # Load dataset
+        # Load and tokenize dataset
         dataset = self.load_data(train_articles_dir, train_labels_dir)
-        
-        # Tokenize dataset
         tokenized_dataset = dataset.map(
             self.tokenize_data, 
             batched=True, 
             remove_columns=dataset.column_names
         )
         
-        # Split dataset
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
 
-        # Define training arguments
+        # Training arguments with gradient accumulation
         training_args = TrainingArguments(
             output_dir=self.output_dir,
-            eval_strategy="steps",
-            eval_steps= 10,
-            save_strategy="steps",
+            eval_strategy="epoch",
+            save_strategy="epoch",
             learning_rate=learning_rate,
-            per_device_train_batch_size=16,
-            per_device_eval_batch_size=16,
+            per_device_train_batch_size=32 if torch.cuda.is_available() else 16,
+            per_device_eval_batch_size=32 if torch.cuda.is_available() else 16,
+            auto_find_batch_size=True,
             num_train_epochs=epochs,
             weight_decay=0.01,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             load_best_model_at_end=True,
             metric_for_best_model="f1",
             logging_dir=os.path.join(self.output_dir, "logs"),
             logging_steps=10,
-            save_total_limit=2
+            save_total_limit=15,
+            fp16=torch.cuda.is_available(),  # Mixed precision training
+            dataloader_num_workers=4 if torch.cuda.is_available() else 0
         )
 
-        # Initialize data collator
+        # Data collator for efficient padding
         data_collator = DataCollatorWithPadding(
             tokenizer=self.tokenizer, 
             padding=True,
             return_tensors="pt"
         )
 
-        # Initialize trainer (this will automatically handle loss)
+        # Optimizer and scheduler
+        optimizer = torch.optim.AdamW(self.model.parameters(), lr=learning_rate)
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", patience=lr_decay_patience, verbose=True)
+
+        # Function to update scheduler on evaluation
+        def update_scheduler(trainer, state, control, metrics=None, **kwargs):
+            if metrics and "eval_loss" in metrics:
+                scheduler.step(metrics["eval_loss"])
+
+        # Trainer
         trainer = Trainer(
             model=self.model,
             args=training_args,
             train_dataset=train_test_split["train"],
             eval_dataset=train_test_split["test"],
-            compute_metrics=self.compute_metrics,
+            compute_metrics=self.compute_metrics,  # No changes here
             data_collator=data_collator,
-            processing_class=self.tokenizer
+            optimizers=(optimizer, None),  # Scheduler handled separately
         )
 
-        # Train the model using Trainer (no need to manually calculate loss)
+        # Train and evaluate
         trainer.train()
         trainer.evaluate()
 
-        # Save model
+        # Save final model and tokenizer
         trainer.save_model(os.path.join(self.output_dir, "final_model"))
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
 
@@ -393,7 +410,7 @@ def main():
     
     # Train the model
     detector.train(
-        train_articles_dir='datasets/train-articles',
+        train_articles_dir='datasets/two-articles',
         train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
     )
     
