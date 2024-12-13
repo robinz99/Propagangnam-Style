@@ -1,7 +1,8 @@
 import os
 import torch
 import numpy as np
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
+
 
 from datasets import Dataset
 from transformers import (
@@ -9,7 +10,7 @@ from transformers import (
     AutoModelForSequenceClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorWithPadding,
+    DataCollatorForTokenClassification,
     TrainerCallback
 )
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -67,111 +68,66 @@ class PropagandaDetector:
         self.model.config.pad_token_id = self.tokenizer.pad_token_id
         self.model.to(self.device)
 
-    def extract_spans(self, text: str, train_labels_dir: str) -> List[Dict[str, Any]]:
+    def extract_word_labels(self, text: str, propaganda_spans: List[Tuple[int, int]]) -> Dict[str, Any]:
         """
-        Extract propaganda and non-propaganda spans from text.
-        
+        Convert propaganda spans to word-level labels.
+
         Args:
-            text (str): Full text content
-            train_labels_dir (str): Path to labels file
-        
+            text (str): Full text content.
+            propaganda_spans (List[Tuple[int, int]]): List of start and end indices for propaganda spans.
+
         Returns:
-            List of span dictionaries with 'text' and 'label' keys
+            A dictionary with tokenized `input_ids` and aligned `labels`.
         """
-        # Extract propaganda spans from labels file
-        propaganda_spans = []
-        try:
-            with open(train_labels_dir, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 3:
-                        # Ignore the first field (Article ID)
-                        start, end = int(parts[1]), int(parts[2])
-                        # Make sure the start and end are within bounds of the text
-                        if start < len(text) and end <= len(text) and start < end:
-                            propaganda_spans.append((start, end))
-        except UnicodeDecodeError:
-            with open(train_labels_dir, 'r', encoding='latin-1') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) >= 3:
-                        start, end = int(parts[1]), int(parts[2])
-                        # Make sure the start and end are within bounds of the text
-                        if start < len(text) and end <= len(text) and start < end:
-                            propaganda_spans.append((start, end))
+        # Tokenize the text
+        tokenized = self.tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_span_length,
+            return_offsets_mapping=True  # Get offsets for alignment
+        )
 
-        # Sort spans to handle overlapping or nested spans
-        propaganda_spans.sort(key=lambda x: x[0])
+        # Initialize labels
+        labels = [0] * len(tokenized["input_ids"])  # Default to non-propaganda (0)
 
-        # Extract spans
-        all_spans = []
-        last_end = 0
-
-        # Add propaganda spans
+        # Align spans with tokens
         for start, end in propaganda_spans:
-            # Add non-propaganda span before current propaganda span
-            if start > last_end:
-                non_prop_span = text[last_end:start]
-                if len(non_prop_span.strip()) > 0:
-                    all_spans.append({
-                        'text': non_prop_span,
-                        'label': 0  # Non-propaganda
-                    })
-            
-            # Add propaganda span
-            prop_span = text[start:end]
-            all_spans.append({
-                'text': prop_span,
-                'label': 1  # Propaganda
-            })
-            
-            last_end = end
+            for idx, (token_start, token_end) in enumerate(tokenized["offset_mapping"]):
+                if token_start >= start and token_end <= end:  # Token falls within a propaganda span
+                    labels[idx] = 1  # Propaganda
 
-        # Add final non-propaganda span if needed
-        if last_end < len(text):
-            final_non_prop_span = text[last_end:]
-            if len(final_non_prop_span.strip()) > 0:
-                all_spans.append({
-                    'text': final_non_prop_span,
-                    'label': 0  # Non-propaganda
-                })
+        # Remove offset mapping (not needed for training)
+        tokenized.pop("offset_mapping")
 
-        # Truncate or filter spans to respect max_span_length
-        filtered_spans = [
-            span for span in all_spans 
-            if len(span['text'].strip()) > 0 and 
-            len(self.tokenizer.encode(span['text'], truncation=True, max_length=self.max_span_length)) <= self.max_span_length
-        ]
+        # Add labels to tokenized data
+        tokenized["labels"] = labels
+        return tokenized
 
-        return filtered_spans
 
     def load_data(self, articles_dir: str, train_labels_dir: str) -> Dataset:
         """
-        Loads articles and corresponding labels from the directories.
-        Returns a HuggingFace Dataset object.
+        Loads articles and generates token-level labels from propaganda spans. 
+
+        Args:
+         articles_dir (str): Directory containing article files.
+         train_labels_dir (str): Path to labels file.
+
+        Returns:
+            A HuggingFace Dataset object with tokenized input and aligned labels.
         """
-        data_dict = {'text': [], 'label': []}
-        article_labels = {}
+        data = []
 
         # Read all label spans from the labels file
-        try:
-            with open(train_labels_dir, 'r', encoding='utf-8') as f:
-                for line in f:
-                    parts = line.strip().split('\t')
-                    if len(parts) == 3:
-                        article_id = parts[0]
-                        start = int(parts[1])
-                        end = int(parts[2])
-
-                        # Organize spans by article ID
-                        if article_id not in article_labels:
-                            article_labels[article_id] = []
-                        article_labels[article_id].append((start, end))
-                    else:
-                        print(f"Skipping malformed line: {line}")
-        except Exception as e:
-            print(f"Error reading label file: {e}")
-            raise ValueError(f"Failed to read {train_labels_dir} file.")
+        article_labels = {}
+        with open(train_labels_dir, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split('\t')
+                if len(parts) == 3:
+                    article_id, start, end = parts[0], int(parts[1]), int(parts[2])
+                    if article_id not in article_labels:
+                        article_labels[article_id] = []
+                    article_labels[article_id].append((start, end))
 
         # Process each article
         for article_file in os.listdir(articles_dir):
@@ -179,54 +135,26 @@ class PropagandaDetector:
             if not article_file.startswith('article') or not article_file.endswith('.txt'):
                 continue
 
-            # Extract article ID 
+            # Extract article ID
             article_id = article_file[7:-4]  # Remove 'article' prefix and '.txt' suffix
-            
-            # Full path to article
             article_path = os.path.join(articles_dir, article_file)
 
             # Read article text
-            try:
-                with open(article_path, 'r', encoding='utf-8') as f:
-                    text = f.read()
-            except UnicodeDecodeError:
-                with open(article_path, 'r', encoding='latin-1') as f:
-                    text = f.read()
+            with open(article_path, 'r', encoding='utf-8') as f:
+                text = f.read()
 
             # If there are labels for this article
             if article_id in article_labels:
-                # Sort the spans by the start value
-                propaganda_spans = sorted(article_labels[article_id], key=lambda x: x[0])
-                last_end = 0  # Track the end of the last span
+                propaganda_spans = article_labels[article_id]
+                tokenized_data = self.extract_word_labels(text, propaganda_spans)
+                data.append(tokenized_data)
 
-                # Add non-propaganda text before and between the propaganda spans
-                for start, end in propaganda_spans:
-                    # Non-propaganda span before the current propaganda span
-                    if start > last_end:
-                        non_prop_span = text[last_end:start]
-                        if len(non_prop_span.strip()) > 0:
-                            data_dict['text'].append(non_prop_span)
-                            data_dict['label'].append(0)  # Non-propaganda
-                    
-                    # Add propaganda span
-                    prop_span = text[start:end]
-                    data_dict['text'].append(prop_span)
-                    data_dict['label'].append(1)  # Propaganda
-                    
-                    last_end = end
-
-                # Add final non-propaganda span after the last propaganda span
-                if last_end < len(text):
-                    final_non_prop_span = text[last_end:]
-                    if len(final_non_prop_span.strip()) > 0:
-                        data_dict['text'].append(final_non_prop_span)
-                        data_dict['label'].append(0)  # Non-propaganda
-
-        if not data_dict['text']:
+        if not data:
             raise ValueError("No data loaded. Check dataset paths.")
 
-        # Return a HuggingFace Dataset from the dictionary
-        return Dataset.from_dict(data_dict)
+        # Return a HuggingFace Dataset
+        return Dataset.from_list(data)
+
 
     def tokenize_data(self, examples):
         """
@@ -247,55 +175,78 @@ class PropagandaDetector:
         tokens["labels"] = examples["label"]
         return tokens
         
+    from sklearn.metrics import accuracy_score, precision_recall_fscore_support, classification_report
+    import numpy as np
+    import os
+
     def compute_metrics(self, eval_pred):
         """
         Compute metrics for the Hugging Face Trainer.
 
-        Args:   
-            eval_pred: Named tuple containing predictions and labels
+        Args:
+            eval_pred: Named tuple containing predictions and labels.
 
         Returns:
-            Dict[str, float]: Dictionary containing accuracy, precision, recall, and F1 score.
+            Dict[str, float]: Dictionary containing accuracy, precision, recall, F1 score, and class-specific metrics.
         """
         labels = eval_pred.label_ids
         preds = eval_pred.predictions.argmax(axis=-1)
 
-        labels_flat = labels.flatten()
-        preds_flat = preds.flatten()
+        # Mask ignored tokens (-100)
+        valid_indices = labels != -100
+        labels_flat = labels[valid_indices]
+        preds_flat = preds[valid_indices]
 
+        # Compute overall metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
             labels_flat, preds_flat, average="binary", zero_division=1
         )
 
-        # Get the current epoch from the trainer state
-        trainer = getattr(self, 'trainer', None)
-        epoch = trainer.state.epoch if trainer and hasattr(trainer.state, 'epoch') else 0
+        # Per-Class Metrics
+        class_metrics = precision_recall_fscore_support(
+            labels_flat, preds_flat, average=None, labels=[0, 1]
+        )
+        non_propaganda_metrics = {
+            "precision": class_metrics[0][0], 
+            "recall": class_metrics[1][0], 
+            "f1": class_metrics[2][0]
+        }
+        propaganda_metrics = {
+            "precision": class_metrics[0][1], 
+            "recall": class_metrics[1][1], 
+            "f1": class_metrics[2][1]
+        }
 
-        # Epoch-specific debug and classification reports
-        debug_path = os.path.join(self.output_dir, f"debug_labels_preds_epoch_{epoch}.txt")
-        with open(debug_path, "w") as f:
-            for i, (true, pred) in enumerate(zip(labels_flat, preds_flat)):
-                f.write(f"Index: {i}, True Label: {true}, Predicted Label: {pred}\n")
+        # Optional Debug Logging for a Subset
+        if getattr(self, "output_dir", None):
+            debug_path = os.path.join(self.output_dir, "debug_labels_preds.txt")
+            sample_indices = np.random.choice(len(labels_flat), size=min(100, len(labels_flat)), replace=False)
+            with open(debug_path, "w") as f:
+                f.write("Subset of Predictions and True Labels:\n")
+                for i in sample_indices:
+                    f.write(f"Index: {i}, True Label: {labels_flat[i]}, Predicted Label: {preds_flat[i]}\n")
 
-        report = classification_report(labels_flat, preds_flat, target_names=["Non-Propaganda", "Propaganda"])
-        report_path = os.path.join(self.output_dir, f"classification_report_epoch_{epoch}.txt")
-
-        with open(report_path, "w") as f:
-            f.write(f"Epoch: {epoch}\n")
-            f.write(f"Accuracy: {accuracy}\n")
-            f.write(f"Precision: {precision}\n")
-            f.write(f"Recall: {recall}\n")
-            f.write(f"F1 Score: {f1}\n\n")
-            f.write("Detailed Classification Report:\n")
-            f.write(report)
+            # Classification report
+            report = classification_report(
+                labels_flat,
+                preds_flat,
+                target_names=["Non-Propaganda", "Propaganda"]
+            )
+            report_path = os.path.join(self.output_dir, "classification_report.txt")
+            with open(report_path, "w") as f:
+                f.write("Detailed Classification Report:\n")
+                f.write(report)
 
         return {
             "accuracy": accuracy,
             "precision": precision,
             "recall": recall,
-            "f1": f1
+            "f1": f1,
+            "non_propaganda_metrics": non_propaganda_metrics,
+            "propaganda_metrics": propaganda_metrics
         }
+
 
 
     def train(self, 
@@ -309,13 +260,9 @@ class PropagandaDetector:
         """
         Train the propaganda detector using gradient accumulation.
         """
-        # Load and tokenize dataset
-        dataset = self.load_data(train_articles_dir, train_labels_dir)
-        tokenized_dataset = dataset.map(
-            self.tokenize_data, 
-            batched=True, 
-            remove_columns=dataset.column_names
-        )
+        # Load tokenized dataset
+        tokenized_dataset = self.load_data(train_articles_dir, train_labels_dir)
+
         
         train_test_split = tokenized_dataset.train_test_split(test_size=test_size)
 
@@ -341,8 +288,8 @@ class PropagandaDetector:
         )
 
         # Data collator for efficient padding
-        data_collator = DataCollatorWithPadding(
-            tokenizer=self.tokenizer, 
+        data_collator = DataCollatorForTokenClassification(
+            tokenizer=self.tokenizer,
             padding=True,
             return_tensors="pt"
         )
@@ -532,6 +479,10 @@ def main():
     test_articles_dir = 'datasets/test-articles'
     train_articles_dir = 'datasets/train-articles'
     test_labels_dir = 'datasets/test-task-tc-template.txt'
+
+    # Paths for testing on only two articles
+    subset_train_articles_dir = 'datasets/two-articles'
+    subset_train_labels_dir = 'datasets/two-labels'
 
     print(f"Model max length: {detector.tokenizer.model_max_length}")
 
