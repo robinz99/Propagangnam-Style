@@ -181,3 +181,31 @@ propaganda_detector/checkpoint-2/rng_state.pth
 propaganda_detector/checkpoint-2/scheduler.pt
 propaganda_detector/checkpoint-2/trainer_state.json
 propaganda_detector/checkpoint-2/training_args.bin
+propaganda_detector/also a pretty good distilroberta model/config.json
+propaganda_detector/also a pretty good distilroberta model/model.safetensors
+propaganda_detector/also a pretty good distilroberta model/optimizer.pt
+propaganda_detector/also a pretty good distilroberta model/rng_state.pth
+propaganda_detector/also a pretty good distilroberta model/scheduler.pt
+propaganda_detector/also a pretty good distilroberta model/trainer_state.json
+propaganda_detector/also a pretty good distilroberta model/training_args.bin
+propaganda_detector/epoch_metrics.csv
+propaganda_detector/final_model_distilbert_2/config.json
+propaganda_detector/final_model_distilbert_2/model.safetensors
+propaganda_detector/final_model_distilbert_2/special_tokens_map.json
+propaganda_detector/final_model_distilbert_2/tokenizer.json
+propaganda_detector/final_model_distilbert_2/tokenizer_config.json
+propaganda_detector/final_model_distilbert_2/training_args.bin
+propaganda_detector/final_model_distilbert_2/vocab.txt
+propaganda_detector/final_model_distilroberta/config.json
+propaganda_detector/final_model_distilroberta/merges.txt
+propaganda_detector/final_model_distilroberta/model.safetensors
+propaganda_detector/final_model_distilroberta/optimizer.pt
+propaganda_detector/final_model_distilroberta/rng_state.pth
+propaganda_detector/final_model_distilroberta/scheduler.pt
+propaganda_detector/final_model_distilroberta/special_tokens_map.json
+propaganda_detector/final_model_distilroberta/tokenizer.json
+propaganda_detector/final_model_distilroberta/tokenizer_config.json
+propaganda_detector/final_model_distilroberta/trainer_state.json
+propaganda_detector/final_model_distilroberta/training_args.bin
+propaganda_detector/final_model_distilroberta/vocab.json
+propaganda_detector/epoch_metrics.csv
