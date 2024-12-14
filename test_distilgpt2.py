@@ -5,8 +5,9 @@ from models.span import PropagandaDetector
 
 # Initialize the PropagandaDetector
 detector = PropagandaDetector(
-    model_name='distilbert-base-uncased',  # Change to the appropriate model for token classification
-    output_dir='models/output'
+    model_name='distilgpt2',  # Change to the appropriate model for token classification
+    output_dir='models/output',
+    #resume_from_checkpoint="models/output/final_model"
 )
 
 # Directories containing the articles and labels
@@ -32,19 +33,28 @@ model = AutoModelForTokenClassification.from_pretrained(
 
 # Define training arguments
 training_args = TrainingArguments(
-    output_dir='models/output',
-    evaluation_strategy="epoch",
+    output_dir='models/output', 
+    eval_strategy="epoch",
     save_strategy="epoch",
-    learning_rate=5e-5,
-    per_device_train_batch_size=4,
-    per_device_eval_batch_size=4,
-    num_train_epochs=3,
+    learning_rate=1e-5, 
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=16, 
+    auto_find_batch_size=True,
+    num_train_epochs=500,
     weight_decay=0.01,
-    logging_dir='models/output/logs',
-    save_total_limit=2,
+    gradient_accumulation_steps=1,
     load_best_model_at_end=True,
     metric_for_best_model="f1",
-    fp16=torch.cuda.is_available()  # Mixed precision training if GPU is available
+    logging_dir='models/output/logs', 
+    logging_steps=5,
+    logging_strategy="epoch",
+    save_total_limit=15,
+    fp16=torch.cuda.is_available(),
+    fp16_opt_level="O1",
+    dataloader_num_workers=1,
+    gradient_checkpointing=True,  # reduce memory
+    max_grad_norm=1.0, # prevent gradient issues
+    
 )
 
 # Data collator for token classification
@@ -57,7 +67,7 @@ trainer = Trainer(
     args=training_args,
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
-    tokenizer=detector.tokenizer,
+    processing_class=detector.tokenizer,
     data_collator=data_collator,
     compute_metrics=detector.compute_metrics
 )

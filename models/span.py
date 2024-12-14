@@ -200,7 +200,7 @@ class PropagandaDetector:
         # Compute overall metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            labels_flat, preds_flat, average="binary", zero_division=1
+            labels_flat, preds_flat, average="binary",  _division=1
         )
 
         # Per-Class Metrics
@@ -505,3 +505,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
