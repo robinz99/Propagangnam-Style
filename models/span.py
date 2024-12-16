@@ -22,7 +22,7 @@ from sklearn.metrics import (
 
 class PropagandaDetector:
     def __init__(self, 
-                 model_name: str = 'distilgpt2', 
+                 model_name: str = 'distilbert-base-uncased', 
                  output_dir: str = "propaganda_detector",
                  max_span_length: int = 512,
                  resume_from_checkpoint: Optional[str] = None):
@@ -49,7 +49,11 @@ class PropagandaDetector:
         self.max_span_length = max_span_length
 
         # Initialize tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if resume_from_checkpoint:
+            self.tokenizer = AutoTokenizer.from_pretrained(resume_from_checkpoint)
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
@@ -531,7 +535,7 @@ def main():
     # Training setup
     detector = PropagandaDetector(
         #model_name="final_model", #select trained model to use
-        resume_from_checkpoint="models/output/final_model",#or select from where to resume training
+        resume_from_checkpoint="models/output/final_model_monday",#or select from where to resume training
         max_span_length=512
     )
     #resume_from_checkpoint="propaganda_detector/final_model_distilbert_correct"
@@ -547,10 +551,10 @@ def main():
     article_path = "datasets/train-articles/article111111111.txt"
     labels_path = "datasets/train-labels-task1-span-identification/article111111111.task1-SI.labels"
 
-    test_tokenization_and_label_alignment_for_article(detector, article_path, labels_path)
+    #test_tokenization_and_label_alignment_for_article(detector, article_path, labels_path)
 
     output_predictions_file = "predictions.txt"
-    detector.predict_from_folder(subset_train_articles_dir, output_predictions_file)
+    detector.predict_from_folder(test_articles_dir, output_predictions_file)
 
 
 
