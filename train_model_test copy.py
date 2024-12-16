@@ -5,13 +5,12 @@ from models.span import PropagandaDetector
 
 # Initialize the PropagandaDetector
 detector = PropagandaDetector(
-    #model_name='distilbert-base-uncased',  # Change to the appropriate model for token classification
+    model_name='distilbert-base-uncased',  # Change to the appropriate model for token classification
     output_dir='models/output',
-    resume_from_checkpoint="models/output/final_model"
 )
 
 # Directories containing the articles and labels
-train_articles_dir = 'datasets/train-articles'
+train_articles_dir = 'datasets/two-articles'
 train_labels_dir = 'datasets/all_in_one_labels/all_labels.txt'
 
 # Load tokenized data
@@ -39,7 +38,7 @@ training_args = TrainingArguments(
     learning_rate=1e-4,
     per_device_train_batch_size=32,
     per_device_eval_batch_size=32,
-    num_train_epochs=100,
+    num_train_epochs=500,
     weight_decay=0.01,
     logging_dir='models/output/logs',
     save_total_limit=2,

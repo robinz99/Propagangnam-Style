@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from datasets import Dataset
 from transformers import (
     AutoTokenizer,
-    AutoModelForSequenceClassification,
+    AutoModelForTokenClassification,
     TrainingArguments, 
     Trainer,
     DataCollatorForTokenClassification,
@@ -56,11 +56,11 @@ class PropagandaDetector:
 
         # Initialize or load model
         if resume_from_checkpoint:
-            self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model = AutoModelForTokenClassification.from_pretrained(
                 resume_from_checkpoint, num_labels=2
             )
         else:
-            self.model = AutoModelForSequenceClassification.from_pretrained(
+            self.model = AutoModelForTokenClassification.from_pretrained(
                 model_name, num_labels=2
             )
         
@@ -96,6 +96,17 @@ class PropagandaDetector:
             for idx, (token_start, token_end) in enumerate(tokenized["offset_mapping"]):
                 if token_start >= start and token_end <= end:  # Token falls within a propaganda span
                     labels[idx] = 1  # Propaganda
+        
+        # Ensure padding tokens are ignored during training
+        for idx, token_id in enumerate(tokenized["input_ids"]):
+            if token_id == self.tokenizer.pad_token_id:
+                labels[idx] = -100  # Ignore padding tokens during loss computation
+
+        # Debugging: Check padding tokens and their labels
+        padding_indices = [idx for idx, token_id in enumerate(tokenized["input_ids"]) if token_id == self.tokenizer.pad_token_id]
+        padding_labels = [labels[idx] for idx in padding_indices]
+        print("Padding indices:", padding_indices)
+        print("Padding labels:", padding_labels)
 
         # Remove offset mapping (not needed for training)
         tokenized.pop("offset_mapping")
@@ -147,6 +158,14 @@ class PropagandaDetector:
             if article_id in article_labels:
                 propaganda_spans = article_labels[article_id]
                 tokenized_data = self.extract_word_labels(text, propaganda_spans)
+                
+                # Debugging: Check if padding tokens are labeled correctly
+                padding_indices = [idx for idx, token_id in enumerate(tokenized_data["input_ids"]) if token_id == self.tokenizer.pad_token_id]
+                padding_labels = [tokenized_data["labels"][idx] for idx in padding_indices]
+                print(f"Article ID: {article_id}")
+                print("Padding indices:", padding_indices)
+                print("Padding labels:", padding_labels)
+                
                 data.append(tokenized_data)
 
         if not data:
@@ -200,7 +219,7 @@ class PropagandaDetector:
         # Compute overall metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            labels_flat, preds_flat, average="binary",  _division=1
+            labels_flat, preds_flat, average="binary"
         )
 
         # Per-Class Metrics
@@ -323,122 +342,116 @@ class PropagandaDetector:
         self.tokenizer.save_pretrained(os.path.join(self.output_dir, "final_model"))
 
 
-    def predict_spans(self, article_id: str, article_path: str):
+    def predict(self, article_id: str, text: str) -> List[str]:
         """
-        Predict and label spans in a full news article as propaganda or non-propaganda.
+        Predict propaganda spans in the given text.
 
         Args:
-            article_id (str): ID of the article (used for output format).
-            article_path (str): Path to the text file containing the news article.
+            article_id (str): The ID of the article.
+            text (str): Input text to analyze.
 
         Returns:
-            List[str]: A list of labeled spans in the format "article_id start end".
+            List[str]: Predictions in the format "article_id start end".
         """
-        # Read the article content
-        try:
-            with open(article_path, 'r', encoding='utf-8') as f:
-                article_text = f.read()
-        except UnicodeDecodeError:
-            with open(article_path, 'r', encoding='latin-1') as f:
-                article_text = f.read()
 
-        # Tokenize the text and retrieve offsets
-        encoded_text = self.tokenizer(
-            article_text,
-            truncation=False,
-            return_offsets_mapping=True
-        )
-        input_ids = encoded_text["input_ids"]
-        offsets = encoded_text["offset_mapping"]
+        print(f"Processing article ID: {article_id}")
+        print(f"Text length: {len(text)} characters")
 
-        spans = []
-
-        # Process input in chunks
-        for i in range(0, len(input_ids), self.max_span_length):
-            chunk_ids = input_ids[i:i + self.max_span_length]
-            chunk_offsets = offsets[i:i + self.max_span_length]
-
-            # Decode the chunk back to text
-            chunk_text = self.tokenizer.decode(chunk_ids, skip_special_tokens=True)
-
-            if not chunk_text.strip():
-                # Log skipped empty chunks
-                print(f"Skipping empty chunk for article {article_id}, indices {i} to {i + self.max_span_length}")
-                continue
-
-            # Ensure truncation when re-encoding
-            chunk_encoded = self.tokenizer(
-                chunk_text,
-                truncation=True,
-                max_length=self.max_span_length,
-                return_offsets_mapping=False,
-                return_tensors="pt"
-            ).to(self.device)
-
-            # Predict the chunk
-            with torch.no_grad():
-                outputs = self.model(**chunk_encoded)
-                predictions = torch.softmax(outputs.logits, dim=1)
-                propaganda_prob = predictions[0][1].item()
-
-            if propaganda_prob > 0.5:  # If classified as propaganda
-                spans.append(f"{article_id}\t{chunk_offsets[0][0]}\t{chunk_offsets[-1][1]}")
-                print(f"PROPAGANDA ALERT in chunk for article {article_id}")
-            else:
-                print(f"No propaganda detected in chunk for article {article_id}, indices {i} to {i + self.max_span_length}")
-
-        return spans
-
-
-    def predict(self, text: str):
-        """
-        Predict if a given text span contains propaganda.
-
-        Args:
-            text (str): Input text to classify.
-
-        Returns:
-            Dict[str, Any]: A dictionary with keys 'has_propaganda' and 'propaganda_probability'.
-        """
-        # Tokenize input
-        inputs = self.tokenizer(
-            text, 
-            return_tensors="pt", 
-            truncation=True, 
-            padding=True
+        # Tokenize the input text
+        tokenized = self.tokenizer(
+            text,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_span_length,
+            return_offsets_mapping=True,  # Get offsets for alignment
+            return_tensors="pt"
         ).to(self.device)
 
-        # Predict
-        with torch.no_grad():
-            outputs = self.model(**inputs)
-        
-        # Get prediction
-        prediction = torch.softmax(outputs.logits, dim=1)
-        propaganda_prob = prediction[0][1].item()
-        
-        return {
-            'has_propaganda': propaganda_prob > 0.5,
-            'propaganda_probability': propaganda_prob
-        }
+        # Extract offset mapping and remove it from tokenized inputs
+        offset_mapping = tokenized.pop("offset_mapping")
+        print(f"Tokenized input: {tokenized}")
+        print(f"Offset mapping: {offset_mapping}")
 
-    def predict_folder(self, folder_path: str):
+        # Make predictions
+        with torch.no_grad():
+            outputs = self.model(**tokenized)
+            logits = outputs.logits
+            predictions = torch.argmax(logits, dim=-1)  # Keep as a tensor for consistency
+            print(f"Logits: {logits}")
+            print(f"Predictions: {predictions}")
+
+        # Ensure predictions are a list (handles single vs batch cases)
+        predictions = predictions.squeeze().tolist()
+        if isinstance(predictions, int):  # Single prediction case
+            predictions = [predictions]
+
+        # Convert predictions back to text spans
+        propaganda_spans = []
+        offset_mapping = offset_mapping.squeeze().tolist()
+        if isinstance(offset_mapping[0], int):  # Handle single-token case
+            offset_mapping = [offset_mapping]
+
+        for idx, pred in enumerate(predictions):
+            if pred == 1:  # Predicted as propaganda
+                start, end = offset_mapping[idx]
+                propaganda_spans.append((start, end))
+        
+        print(f"Propaganda spans before merging: {propaganda_spans}")
+
+        # Merge consecutive spans
+        merged_spans = []
+        for start, end in propaganda_spans:
+            if not merged_spans or start > merged_spans[-1][1]:
+                merged_spans.append((start, end))
+            else:
+                # Extend the last span
+                merged_spans[-1] = (merged_spans[-1][0], max(merged_spans[-1][1], end))
+        
+        print(f"Merged spans: {merged_spans}")
+
+
+        # Format output as "article_id start end"
+        formatted_output = [f"{article_id}\t{start}\t{end}" for start, end in merged_spans]
+        print(f"Formatted output: {formatted_output}")
+        return formatted_output
+
+
+
+
+    def predict_from_folder(self, folder_path: str, output_file: str) -> None:
         """
-        Predict propaganda spans for all articles in a folder.
+        Predict propaganda spans for all articles in a folder and save the results.
 
         Args:
-            folder_path (str): Path to the folder containing article text files.
+            folder_path (str): Path to the folder containing test article `.txt` files.
+            output_file (str): Path to the file where predictions will be saved.
 
         Returns:
-            List[str]: A list of labeled spans for all articles.
+            None: Writes predictions to the specified output file.
         """
-        predictions = []
+        all_predictions = []
+
+        # Process each article file in the folder
         for file_name in os.listdir(folder_path):
-            file_path = os.path.join(folder_path, file_name)
-            if os.path.isfile(file_path):
-                article_id = os.path.splitext(file_name)[0]  # Use the file name (without extension) as the article ID
-                spans = self.predict_spans(article_id, file_path)
-                predictions.extend(spans)
-        return predictions
+            if file_name.endswith('.txt') and file_name.startswith('article'):
+                # Extract article ID from the file name
+                article_id = file_name[7:-4]  # Removes 'article' prefix and '.txt' suffix
+                file_path = os.path.join(folder_path, file_name)
+
+                # Read the article text
+                with open(file_path, 'r', encoding='utf-8') as file:
+                    text = file.read()
+
+                # Get predictions for this article
+                predictions = self.predict(article_id, text)
+                all_predictions.extend(predictions)
+
+        # Save all predictions to the output file
+        with open(output_file, "w") as f:
+            for line in all_predictions:
+                f.write(line + "\n")
+
+        print(f"Predictions saved to {output_file}")
 
     def save_predictions(self, output_file: str, predictions: List[str]):
         """
@@ -451,31 +464,77 @@ class PropagandaDetector:
         with open(output_file, "w") as f:
             f.write("\n".join(predictions) + "\n")
 
+def test_tokenization_and_label_alignment_for_article(detector: PropagandaDetector, article_path: str, labels_path: str):
+    """
+    Test if tokenization and label alignment during training match tokenization during inference
+    for a specific article.
+
+    Args:
+        detector (PropagandaDetector): The initialized detector instance.
+        article_path (str): Path to the article file.
+        labels_path (str): Path to the corresponding labels file.
+    """
+    # Read the article content
+    with open(article_path, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    # Read the labels for the article
+    article_id = article_path.split('/')[-1].split('.')[0].replace('article', '')
+    spans = []
+    with open(labels_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            parts = line.strip().split('\t')
+            if parts[0] == article_id:
+                spans.append((int(parts[1]), int(parts[2])))
+
+    print(f"Article ID: {article_id}")
+    print(f"Text length: {len(text)}")
+    print(f"Propaganda spans: {spans}")
+
+    # Tokenization and label alignment
+    training_tokenized = detector.extract_word_labels(text, spans)
+    print("\n=== Training Tokenization & Labels ===")
+    for token_id, label in zip(training_tokenized["input_ids"], training_tokenized["labels"]):
+        print(f"Token ID: {token_id}, Token: {detector.tokenizer.decode([token_id])}, Label: {label}")
+
+    # Inference tokenization
+    inference_tokenized = detector.tokenizer(
+        text,
+        truncation=True,
+        padding="max_length",
+        max_length=detector.max_span_length,
+        return_offsets_mapping=True,
+        return_tensors="pt"
+    )
+    offsets = inference_tokenized.pop("offset_mapping").squeeze().tolist()
+
+    print("\n=== Inference Tokenization ===")
+    for token_id, offset in zip(inference_tokenized["input_ids"].squeeze().tolist(), offsets):
+        token = detector.tokenizer.decode([token_id])
+        print(f"Token ID: {token_id}, Token: {token}, Offset: {offset}")
+
+    print("\n=== Comparison of Training and Inference ===")
+    for idx, (train_id, train_label) in enumerate(zip(training_tokenized["input_ids"], training_tokenized["labels"])):
+        if idx < len(inference_tokenized["input_ids"].squeeze()):
+            infer_id = inference_tokenized["input_ids"].squeeze()[idx].item()
+            if train_id != infer_id:
+                print(f"Mismatch at index {idx}: Training Token ID {train_id}, Inference Token ID {infer_id}")
+            else:
+                print(f"Match at index {idx}: Token ID {train_id}")
+        else:
+            print(f"Training token {train_id} exceeds inference tokenization length.")
+
+    print("\n=== Debugging Completed ===")
+
+
 def main():
     # Training setup
     detector = PropagandaDetector(
         #model_name="final_model", #select trained model to use
-        resume_from_checkpoint="propaganda_detector/final_model", #or select from where to resume training
+        resume_from_checkpoint="models/output/final_model",#or select from where to resume training
         max_span_length=512
     )
-    
-    # Train the model
-    #detector.train(
-    #    train_articles_dir='datasets/train-articles',
-    #    train_labels_dir='datasets/all_in_one_labels/all_labels.txt'
-    #)
-    
-    # Example predictions
-    test_texts = [
-        "This is a sample text without propaganda.",
-        "This is a text with clear propaganda messaging."
-    ]
-    
-    for text in test_texts:
-        result = detector.predict(text)
-        print(f"Text: {text}")
-        print(f"Prediction: {result}")
-
+    #resume_from_checkpoint="propaganda_detector/final_model_distilbert_correct"
     test_articles_dir = 'datasets/test-articles'
     train_articles_dir = 'datasets/train-articles'
     test_labels_dir = 'datasets/test-task-tc-template.txt'
@@ -483,25 +542,19 @@ def main():
     # Paths for testing on only two articles
     subset_train_articles_dir = 'datasets/two-articles'
     subset_train_labels_dir = 'datasets/two-labels'
+    output_predictions_file = "predictions.txt"
+
+    article_path = "datasets/train-articles/article111111111.txt"
+    labels_path = "datasets/train-labels-task1-span-identification/article111111111.task1-SI.labels"
+
+    test_tokenization_and_label_alignment_for_article(detector, article_path, labels_path)
+
+    output_predictions_file = "predictions.txt"
+    detector.predict_from_folder(subset_train_articles_dir, output_predictions_file)
+
+
 
     print(f"Model max length: {detector.tokenizer.model_max_length}")
-
-    # Loading how the predictions should be like (True labels matched with corresponding parts of the articles)
-    pred_data = detector.load_data(test_articles_dir, test_labels_dir)
-    df = pred_data.to_pandas()
-    predictions_debug = os.path.join(detector.output_dir, "debug_loaded_pred_articles_with_labels.txt")
-
-    # Save the DataFrame to a text file
-    with open(predictions_debug, "w", encoding="utf-8") as f:
-        f.write(df.to_string(index=False))
-
-
-    # Our prediction
-    predictions = detector.predict_folder(train_articles_dir)
-
-    # Save to file
-    output_file = "predictions.txt"
-    detector.save_predictions(output_file, predictions)
 
 if __name__ == "__main__":
     main()
