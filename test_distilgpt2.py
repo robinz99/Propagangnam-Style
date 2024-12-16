@@ -20,7 +20,7 @@ tokenized_dataset = detector.load_data(train_articles_dir, train_labels_dir)
 
 # Split into training and evaluation datasets
 print("Splitting data into training and evaluation sets...")
-train_test_split = tokenized_dataset.train_test_split(test_size=0.5)
+train_test_split = tokenized_dataset.train_test_split(test_size=0.1)
 train_dataset = train_test_split['train']
 eval_dataset = train_test_split['test']
 

@@ -10,8 +10,7 @@ from transformers import (
     AutoModelForTokenClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorForTokenClassification,
-    TrainerCallback
+    DataCollatorForTokenClassification
 )
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import (
@@ -531,7 +530,7 @@ def main():
     # Training setup
     detector = PropagandaDetector(
         #model_name="final_model", #select trained model to use
-        resume_from_checkpoint="models/output/final_model",#or select from where to resume training
+        resume_from_checkpoint="models/output/final_model", #or select from where to resume training
         max_span_length=512
     )
     #resume_from_checkpoint="propaganda_detector/final_model_distilbert_correct"
@@ -551,8 +550,6 @@ def main():
 
     output_predictions_file = "predictions.txt"
     detector.predict_from_folder(subset_train_articles_dir, output_predictions_file)
-
-
 
     print(f"Model max length: {detector.tokenizer.model_max_length}")
 

@@ -20,7 +20,7 @@ tokenized_dataset = detector.load_data(train_articles_dir, train_labels_dir)
 
 # Split into training and evaluation datasets
 print("Splitting data into training and evaluation sets...")
-train_test_split = tokenized_dataset.train_test_split(test_size=0.5)
+train_test_split = tokenized_dataset.train_test_split(test_size=0.1)
 train_dataset = train_test_split['train']
 eval_dataset = train_test_split['test']
 
@@ -40,9 +40,9 @@ training_args = TrainingArguments(
     per_device_train_batch_size=64 if torch.cuda.is_available() else 16,
     per_device_eval_batch_size=64 if torch.cuda.is_available() else 16,
     auto_find_batch_size=True,
-    num_train_epochs=500,
+    num_train_epochs=200,
     weight_decay=0.01,
-    gradient_accumulation_steps=1,
+    gradient_accumulation_steps=2,
     load_best_model_at_end=True,
     metric_for_best_model="f1",
     logging_dir='models/output/logs', 
