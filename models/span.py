@@ -10,8 +10,7 @@ from transformers import (
     AutoModelForTokenClassification,
     TrainingArguments, 
     Trainer,
-    DataCollatorForTokenClassification,
-    TrainerCallback
+    DataCollatorForTokenClassification
 )
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.metrics import (
@@ -555,8 +554,6 @@ def main():
 
     output_predictions_file = "predictions.txt"
     detector.predict_from_folder(test_articles_dir, output_predictions_file)
-
-
 
     print(f"Model max length: {detector.tokenizer.model_max_length}")
 
