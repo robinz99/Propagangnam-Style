@@ -444,7 +444,27 @@ class PropagandaDetector:
 
                 # Get predictions for this article
                 predictions = self.predict(article_id, text)
-                all_predictions.extend(predictions)
+                
+                # Concatenate continuous spans
+                merged_predictions = []
+                current_start, current_end = None, None
+                for prediction in predictions:
+                    _, start, end = prediction.split('\t')
+                    start, end = int(start), int(end)
+
+                    if current_start is None:
+                        current_start, current_end = start, end
+                    elif start <= current_end + 1:  # Extend the current span
+                        current_end = max(current_end, end)
+                    else:  # Save the completed span
+                        merged_predictions.append(f"{article_id}\t{current_start}\t{current_end}")
+                        current_start, current_end = start, end
+
+                # Save the last span
+                if current_start is not None:
+                    merged_predictions.append(f"{article_id}\t{current_start}\t{current_end}")
+
+                all_predictions.extend(merged_predictions)
 
         # Save all predictions to the output file
         with open(output_file, "w") as f:
