@@ -270,7 +270,6 @@ class PropagandaDetector:
         }
 
 
-
     def train(self, 
             train_articles_dir: str, 
             train_labels_dir: str, 
@@ -334,6 +333,7 @@ class PropagandaDetector:
             compute_metrics=self.compute_metrics,  # No changes here
             data_collator=data_collator,
             optimizers=(optimizer, None),  # Scheduler handled separately
+            
         )
 
         # Train and evaluate
@@ -417,9 +417,6 @@ class PropagandaDetector:
         formatted_output = [f"{article_id}\t{start}\t{end}" for start, end in merged_spans]
         print(f"Formatted output: {formatted_output}")
         return formatted_output
-
-
-
 
     def predict_from_folder(self, folder_path: str, output_file: str) -> None:
         """
@@ -559,4 +556,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

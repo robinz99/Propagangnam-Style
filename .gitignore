@@ -720,3 +720,4 @@ propaganda_type_detector/final_model/tokenizer.json
 propaganda_type_detector/final_model/tokenizer_config.json
 propaganda_type_detector/final_model/training_args.bin
 propaganda_type_detector/final_model/vocab.txt
+models/__pycache__/span.cpython-311.pyc
