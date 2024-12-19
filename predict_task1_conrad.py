@@ -1,5 +1,4 @@
-import os
-from models.span_thursday import PropagandaDetector
+from models.span import PropagandaDetector
 
 def main():
     # Initialize detector with pre-trained model
