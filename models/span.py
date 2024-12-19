@@ -466,6 +466,9 @@ class PropagandaDetector:
 
                 all_predictions.extend(merged_predictions)
 
+        # Insert "?" as the second column
+        all_predictions = [line.split('\t')[0] + '\t?\t' + '\t'.join(line.split('\t')[1:]) for line in all_predictions]
+
         # Save all predictions to the output file
         with open(output_file, "w") as f:
             for line in all_predictions:
