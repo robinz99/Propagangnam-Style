@@ -721,3 +721,16 @@ propaganda_type_detector/final_model/tokenizer_config.json
 propaganda_type_detector/final_model/training_args.bin
 propaganda_type_detector/final_model/vocab.txt
 models/__pycache__/span.cpython-311.pyc
+models/output/checkpoint-3/config.json
+models/output/checkpoint-3/model.safetensors
+models/output/checkpoint-3/optimizer.pt
+models/output/checkpoint-3/rng_state.pth
+models/output/checkpoint-3/scheduler.pt
+models/output/checkpoint-3/special_tokens_map.json
+models/output/checkpoint-3/tokenizer.json
+models/output/checkpoint-3/tokenizer_config.json
+models/output/checkpoint-3/trainer_state.json
+models/output/checkpoint-3/training_args.bin
+models/output/checkpoint-3/vocab.txt
+models/__pycache__/span.cpython-311.pyc
+models/__pycache__/span_thursday.cpython-311.pyc

@@ -1,4 +1,4 @@
-from transformers import AutoTokenizer, AutoModelForTokenClassification, TrainingArguments, Trainer, DataCollatorForTokenClassification
+from transformers import AutoModelForTokenClassification, TrainingArguments, Trainer, DataCollatorForTokenClassification
 from sklearn.model_selection import train_test_split
 import torch
 from models.span import PropagandaDetector 

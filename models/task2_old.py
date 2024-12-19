@@ -205,7 +205,13 @@ class PropagandaTypeDetector:
         
         return dataset
 
-    def train(self, train_articles_dir: str, train_labels_dir: str, epochs: int = 20):
+    def train(self, 
+            train_articles_dir: str, 
+            train_labels_dir: str, 
+            epochs: int = 20,
+            learning_rate: float = 5e-5,
+            gradient_accumulation_steps: int = 1,
+            lr_decay_patience: int = 5):
         """
         Train the propaganda type detector.
         
@@ -233,7 +239,7 @@ class PropagandaTypeDetector:
             dataloader_num_workers=4 if torch.cuda.is_available() else 0,
             fp16=torch.cuda.is_available(),
             auto_find_batch_size=True,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=gradient_accumulation_steps,
             warmup_steps=100,
             weight_decay=0.01,
             eval_strategy="epoch",
@@ -242,6 +248,8 @@ class PropagandaTypeDetector:
             save_total_limit=15,
             load_best_model_at_end=True,
             report_to="none",
+            learning_rate=learning_rate,
+            lr_scheduler_type="linear",
         )
 
         # Initialize trainer

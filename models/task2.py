@@ -275,7 +275,6 @@ def main():
     # Save the fine-tuned model
     #trainer.save_model("./trained_model_task2")
 
-    
 
 if __name__ == "__main__":
     main()
