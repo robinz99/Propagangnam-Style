@@ -23,7 +23,7 @@ from sklearn.metrics import (
 class PropagandaDetector:
     def __init__(self, 
                  model_name: str = 'distilbert-base-uncased', 
-                 output_dir: str = "propaganda_detector",
+                 output_dir: str = "models/output",
                  max_span_length: int = 512,
                  resume_from_checkpoint: Optional[str] = None):
         """
@@ -219,7 +219,7 @@ class PropagandaDetector:
         # Compute overall metrics
         accuracy = accuracy_score(labels_flat, preds_flat)
         precision, recall, f1, _ = precision_recall_fscore_support(
-            labels_flat, preds_flat, average="binary", zero_division=1
+            labels_flat, preds_flat, average="binary"
         )
 
         # Per-Class Metrics
