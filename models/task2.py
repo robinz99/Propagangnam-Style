@@ -4,8 +4,9 @@ import pandas as pd
 from typing import List, Dict, Any
 import os
 import glob
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments
+from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments, EvalPrediction
 from torch.utils.data import Dataset
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
 
 # Define the label-to-ID mapping
@@ -164,6 +165,126 @@ def extract_span_texts_and_labels(training_data):
 
     return span_texts, span_labels
 
+def predict(article_folder: str, span_file: str, model_path: str, output_file: str):
+    """
+    Predicts propaganda types for spans in articles using a trained model.
+
+    Parameters
+    ----------
+    article_folder : str
+        Path to the folder containing article text files.
+    span_file : str
+        Path to the file containing spans to predict in the format:
+        <article_id>    <irrelevant_column>    <start>    <end>
+    model_path : str
+        Path to the trained model for prediction.
+    output_file : str
+        Path to save the predictions in the format:
+        <article_id>    <start>    <end>    <predicted_label>
+    """
+    # Load the tokenizer and model
+    tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
+    model = DistilBertForSequenceClassification.from_pretrained(model_path)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.to(device)
+    model.eval()
+
+    # Step 1: Load articles
+    print("Loading articles...")
+    articles = {}
+    for file in os.listdir(article_folder):
+        if file.startswith("article") and file.endswith(".txt"):
+            article_id = file.replace("article", "").replace(".txt", "")
+            with open(os.path.join(article_folder, file), "r", encoding="utf-8") as f:
+                articles[article_id] = f.read()
+
+    print(f"Loaded {len(articles)} articles.")
+
+    # Step 2: Load spans
+    print("Loading spans...")
+    spans = []
+    with open(span_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) >= 4:  # Ensure there are at least 4 columns
+                article_id, _, start, end = parts
+                spans.append((article_id, int(start), int(end)))
+            else:
+                print(f"Skipping invalid line: {line.strip()}")
+
+    print(f"Loaded {len(spans)} spans.")
+
+    # Step 3: Predict propaganda type for each span
+    print("Predicting propaganda types...")
+    predictions = []
+    for article_id, start, end in spans:
+        if article_id in articles:
+            article_text = articles[article_id]
+            span_text = article_text[start:end]
+
+            # Tokenize the span
+            inputs = tokenizer(span_text, return_tensors="pt", truncation=True, padding=True, max_length=128)
+            inputs = {key: val.to(device) for key, val in inputs.items()}
+
+            # Get model predictions
+            with torch.no_grad():
+                outputs = model(**inputs)
+                logits = outputs.logits
+                predicted_label_id = torch.argmax(logits, dim=-1).item()
+                predicted_label = model.config.id2label[predicted_label_id]
+
+            # Save the prediction
+            predictions.append((article_id, start, end, predicted_label))
+        else:
+            print(f"Warning: Article ID {article_id} not found.")
+
+    # Step 4: Save predictions to output file
+    print(f"Saving predictions to {output_file}...")
+    with open(output_file, "w", encoding="utf-8") as f:
+        for article_id, start, end, predicted_label in predictions:
+            f.write(f"{article_id}\t{start}\t{end}\t{predicted_label}\n")
+
+    print("Predictions saved successfully.")
+
+def compute_metrics(p: EvalPrediction):
+    """
+    Computes metrics for evaluation during training and testing.
+
+    Parameters
+    ----------
+    p : EvalPrediction
+        Contains `predictions` and `label_ids`:
+        - `predictions` is a 2D array of shape (n_samples, n_classes) with the logits or probabilities.
+        - `label_ids` is a 1D array of shape (n_samples,) with the ground-truth labels.
+
+    Returns
+    -------
+    dict
+        A dictionary mapping metric names to their values.
+    """
+    preds = p.predictions
+    if isinstance(preds, tuple):
+        preds = preds[0]
+    # Get the predicted class by choosing the class with the highest logit score
+    preds = preds.argmax(axis=1)
+    labels = p.label_ids
+    
+    # Compute accuracy
+    accuracy = accuracy_score(labels, preds)
+
+    # Compute precision, recall, f1 for each class
+    # average='macro' calculates metrics independently for each class 
+    # and then takes the average of them
+    precision, recall, f1, _ = precision_recall_fscore_support(labels, preds, average='macro', zero_division=0)
+
+
+    return {
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1
+    }
+
 def main():
 
     # Verify CUDA availability
@@ -174,13 +295,14 @@ def main():
     test_articles_dir = 'datasets/test-articles'
     train_articles_dir = 'datasets/train-articles'
     test_labels_dir = 'datasets/test-task-tc-template.txt'
+    train_labels_dir = 'datasets/train-labels-task2-technique-classification'
 
     # Paths for testing on only two articles
     subset_train_articles_dir = 'datasets/two-articles'
     subset_train_labels_dir = 'datasets/two-labels-task2'
-    output_predictions_file = "predictions.txt"
+    output_predictions_file = "predictions_task2.txt"
 
-    testrundata = load_training_data(subset_train_articles_dir, subset_train_labels_dir)
+    testrundata = load_training_data(train_articles_dir, train_labels_dir)
     span_texts, span_labels = extract_span_texts_and_labels(testrundata)
 
     # Additional debug info after Step 2 extraction
@@ -207,8 +329,8 @@ def main():
         print("First 3 numeric labels:", numeric_labels[:3])
 
     # Tokenize the data
-    model_name = "distilbert-base-uncased"  # a common lightweight model
-    tokenizer = DistilBertTokenizerFast.from_pretrained(model_name)
+    model_name = "models/output/checkpoint-1920"  # a common lightweight model
+    tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
     encodings = tokenizer(span_texts, truncation=True, padding=True, max_length=128)
 
     # Create a Torch Dataset
@@ -228,7 +350,7 @@ def main():
     dataset = PropagandaTypeDataset(encodings, numeric_labels)
 
     # Split into train/val sets
-    train_size = int(0.5 * len(dataset))
+    train_size = int(0.9 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
 
@@ -237,7 +359,8 @@ def main():
         model_name, 
         num_labels=len(unique_labels),
         id2label=id2label,
-        label2id=label2id
+        label2id=label2id,
+        ignore_mismatched_sizes=True
     ).to(device)
     
     # Define TrainingArguments and Trainer
@@ -262,18 +385,23 @@ def main():
         model=model,
         args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics
     )
 
-    # Train the model
-    trainer.train()
+    # Uncomment to train the model
+    #trainer.train()
 
     # Evaluate the model (trainer.evaluate returns metrics)
-    eval_metrics = trainer.evaluate()
-    print("Evaluation metrics:", eval_metrics)
+    #eval_metrics = trainer.evaluate()
+    #print("Evaluation metrics:", eval_metrics)
 
     # Save the fine-tuned model
     #trainer.save_model("./trained_model_task2")
+
+    task2labelspath = 'datasets/train-task2-TC.labels'
+    predict(train_articles_dir, task2labelspath, model_name, output_predictions_file)
+
 
     
 
