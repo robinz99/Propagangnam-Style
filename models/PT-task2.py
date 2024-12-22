@@ -4,7 +4,7 @@ import pandas as pd
 from typing import List, Dict, Any
 import os
 import glob
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments, EvalPrediction
+from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments, EvalPrediction, EarlyStoppingCallback
 from torch.utils.data import Dataset
 from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 
@@ -329,9 +329,9 @@ def main():
         print("First 3 numeric labels:", numeric_labels[:3])
 
     # Tokenize the data
-    model_name = "models/output/checkpoint-1920"  # a common lightweight model
+    model_name = "distilbert-base-uncased"
     tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
-    encodings = tokenizer(span_texts, truncation=True, padding=True, max_length=128)
+    encodings = tokenizer(span_texts, truncation=True, padding=True, max_length=512)
 
     # Create a Torch Dataset
     class PropagandaTypeDataset(Dataset):
@@ -363,22 +363,29 @@ def main():
         ignore_mismatched_sizes=True
     ).to(device)
     
+    # Early stopping on plateau
+    early_stopping_callback = EarlyStoppingCallback(early_stopping_patience=10)  # Patience is the number of evaluations with no improvement
+
     # Define TrainingArguments and Trainer
     training_args = TrainingArguments(
         output_dir='./results-task2',          # output directory
-        num_train_epochs=3,              # total number of training epochs
-        per_device_train_batch_size=16,  # batch size per device during training
-        per_device_eval_batch_size=16,   # batch size for evaluation
+        num_train_epochs=100,              # total number of training epochs
+        per_device_train_batch_size=64,  # batch size per device during training
+        per_device_eval_batch_size=64,   # batch size for evaluation
         warmup_steps=100,                # number of warmup steps for learning rate scheduler
-        weight_decay=0.01,               # strength of weight decay
-        eval_strategy="epoch",     # evaluate at the end of each epoch
+        weight_decay=0.02,               # strength of weight decay
+        eval_strategy="epoch",              # evaluate at the end of each epoch
         save_strategy="epoch",
         logging_dir='./logs-task2',            # directory for storing logs
         logging_steps=50,
-        save_total_limit=2,              # only keep last two checkpoints
+        save_total_limit=50,              # only keep last two checkpoints
         load_best_model_at_end=True,      # load best model at end of training
         report_to="none",                # disable reporting to wandb or similar
-        no_cuda=not torch.cuda.is_available()  # Use CUDA if available
+        use_cpu=False,                  # Use CUDA if available
+        gradient_accumulation_steps=3,
+        metric_for_best_model="f1",
+        learning_rate=5e-5,
+        lr_scheduler_type="cosine",
     )
 
     trainer = Trainer(
@@ -386,24 +393,23 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        compute_metrics=compute_metrics
+        compute_metrics=compute_metrics,
+        callbacks=[early_stopping_callback]
     )
 
     # Uncomment to train the model
-    #trainer.train()
+    trainer.train()
 
     # Evaluate the model (trainer.evaluate returns metrics)
-    #eval_metrics = trainer.evaluate()
-    #print("Evaluation metrics:", eval_metrics)
+    eval_metrics = trainer.evaluate()
+    print("Evaluation metrics:", eval_metrics)
 
     # Save the fine-tuned model
-    #trainer.save_model("./trained_model_task2")
+    trainer.save_model("./trained_model_task2")
+    tokenizer.save_pretrained("./trained_model_task2")
 
     task2labelspath = 'datasets/train-task2-TC.labels'
     predict(train_articles_dir, task2labelspath, model_name, output_predictions_file)
-
-
-    
 
 if __name__ == "__main__":
     main()

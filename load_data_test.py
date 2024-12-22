@@ -3,12 +3,12 @@ import pandas as pd
 
 # Initialize the PropagandaDetector
 detector = PropagandaDetector(
-    model_name='distilgpt2',
+    model_name='distilbert-base-uncased',
     output_dir='models/output',
 )
 
 # Directories containing the articles and labels
-train_articles_dir = 'datasets/two-articles'
+train_articles_dir = 'datasets/train-articles'
 train_labels_dir = 'datasets/all_in_one_labels/all_labels.txt'
 
 # Test the `load_data` function
