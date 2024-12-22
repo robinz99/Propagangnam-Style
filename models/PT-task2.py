@@ -1,4 +1,3 @@
-# Step 1
 import torch
 import pandas as pd
 from typing import List, Dict, Any
@@ -28,7 +27,7 @@ label_to_id = {
     "Bandwagon,Reductio_ad_hitlerum": 14,
     "Red_Herring": 15
 }
-
+​
 
 def load_training_data(train_articles_dir, train_labels_dir):
     """

@@ -552,11 +552,10 @@ def test_tokenization_and_label_alignment_for_article(detector: PropagandaDetect
 def main():
     # Training setup
     detector = PropagandaDetector(
-        model_name="distilbert-base-uncased",                                  #select trained model to use
-        #resume_from_checkpoint="models/output/final_model_monday",  #or select from where to resume training
+        #model_name="distilbert-base-uncased",                                  #select trained model to use
+        resume_from_checkpoint="models/output/final_model_monday",  #or select from where to resume training
         max_span_length=512
     )
-    #resume_from_checkpoint="propaganda_detector/final_model_distilbert_correct"
     test_articles_dir = 'datasets/test-articles'
     train_articles_dir = 'datasets/train-articles'
     test_labels_dir = 'datasets/test-task-tc-template.txt'
@@ -567,8 +566,6 @@ def main():
     output_predictions_file = "predictions.txt"
 
     detector.predict_from_folder(test_articles_dir, output_predictions_file)
-
-    print(f"Model max length: {detector.tokenizer.model_max_length}")
 
 if __name__ == "__main__":
     main()
